@@ -115,6 +115,39 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/LLM Media Library_0.
 在 Windows 上运行安装程序（默认按当前用户安装，无需管理员权限）。Windows 10/11 自带 WebView2；
 旧系统上安装程序会自动下载 WebView2 运行时。安装后首次启动会要求选择数据目录。
 
+## 发布 GitHub Release
+
+发布流程由 GitHub Actions 自动完成（`.github/workflows/release.yml`）：推送 `v*` 标签后，
+在 `windows-latest` 上运行测试并构建 NSIS（`.exe`）与 MSI 安装包，然后创建一个
+**草稿（Draft）Release**，附带安装包与 `SHA256SUMS.txt`，并自动生成更新说明。
+
+1. 更新版本号（同时写入 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、
+   `src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`）：
+
+   ```bash
+   npm run version:set -- 0.2.0
+   npm run version:check
+   ```
+
+2. 提交并通过 PR 合并到 `main`（CI 会检查各文件版本号是否一致、类型检查与单元测试）。
+3. 在 `main` 上打标签并推送：
+
+   ```bash
+   git checkout main && git pull
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+4. 等待 Actions 中的 **Release** 工作流完成，到 GitHub 的 Releases 页面检查草稿内容，点击 **Publish release** 发布。
+
+说明：
+
+- 标签必须与应用版本号一致（`v0.2.0` ↔ `0.2.0`），否则工作流会在 `verify` 阶段失败。
+- 带预发布后缀的标签（如 `v0.2.0-beta.1`）会被标记为 Pre-release。
+- 也可以在 Actions 页面手动运行 **Release**（`workflow_dispatch`），输入已存在的标签以重新构建；
+  若该 Release 已存在，会覆盖其中的安装包文件。
+- 安装包未做代码签名，Windows SmartScreen 可能会提示“未知发布者”。
+
 ## 项目结构
 
 ```
