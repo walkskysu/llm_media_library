@@ -14,6 +14,8 @@ export interface Video {
   error?: string;
   addedAt: string; // ISO timestamp
   updatedAt: string;
+  /** Absolute path of the cover image cached in 数据目录/thumbnails (managed by the backend). */
+  localThumbnail?: string;
 }
 
 export interface VideoMetadata {

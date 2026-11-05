@@ -1,13 +1,14 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { documentDir, join } from "@tauri-apps/api/path";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { backend } from "./lib/backend";
 import { DEFAULT_MODEL, fetchOEmbed, GeminiClient } from "./lib/gemini";
-import { filterVideos, newVideo, recoverInterrupted, sortVideos } from "./lib/library";
+import { createQueue, filterVideos, newVideo, recoverInterrupted, sortVideos, thumbnailCandidates } from "./lib/library";
 import { formatDuration } from "./lib/format";
 import { parseTranscript } from "./lib/transcript";
 import type { GeminiConfig, Video } from "./lib/types";
-import { embedUrl, extractVideoId, thumbnailUrl } from "./lib/youtube";
+import { embedUrl, extractVideoId } from "./lib/youtube";
 
 const state = {
   dataDir: null as string | null,
@@ -44,12 +45,59 @@ function toast(msg: string, kind: "info" | "error" = "info") {
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-async function persist() {
+const dbQueue = createQueue();
+
+/** Write the current in-memory state of one video to the SQLite database. */
+async function persist(id: string) {
   try {
-    await backend.saveLibrary(state.videos);
+    await dbQueue(async () => {
+      // Read state when the write actually runs, so a deleted video isn't resurrected.
+      const v = state.videos.find((x) => x.id === id);
+      if (v) await backend.saveVideo(v);
+    });
   } catch (e) {
     toast(`保存失败: ${errMsg(e)}`, "error");
   }
+}
+
+async function removeVideo(id: string) {
+  state.videos = state.videos.filter((x) => x.id !== id);
+  try {
+    await dbQueue(() => backend.deleteVideo(id));
+  } catch (e) {
+    toast(`删除失败: ${errMsg(e)}`, "error");
+  }
+}
+
+const caching = new Set<string>();
+const coverRetried = new Set<string>();
+const coverStamp = new Map<string, number>();
+
+/** Download the cover into 数据目录/thumbnails so it is always displayed from local storage. */
+async function cacheThumbnail(id: string) {
+  const v = state.videos.find((x) => x.id === id);
+  if (!v || caching.has(id)) return;
+  caching.add(id);
+  try {
+    // Queue behind pending writes: the backend requires the row to exist.
+    const path = await dbQueue(() => backend.cacheThumbnail(id, thumbnailCandidates(v)));
+    if (state.videos.some((x) => x.id === id)) {
+      coverStamp.set(id, Date.now());
+      state.videos = state.videos.map((x) => (x.id === id ? { ...x, localThumbnail: path } : x));
+      refresh(id);
+    }
+  } catch (e) {
+    console.warn(`cover cache failed for ${id}:`, e);
+  } finally {
+    caching.delete(id);
+  }
+}
+
+/** Cover src: always the locally cached file (cache-busted so a re-download shows up). */
+function coverSrc(v: Video): string | null {
+  if (!v.localThumbnail) return null;
+  const stamp = coverStamp.get(v.id);
+  return convertFileSrc(v.localThumbnail) + (stamp ? `?v=${stamp}` : "");
 }
 
 function updateVideo(id: string, patch: Partial<Video>) {
@@ -89,7 +137,7 @@ async function renderSetup(changing = false) {
       h(
         "p",
         {},
-        "请选择用于存放收藏数据的目录（data 目录）。收藏列表保存为该目录下的 library.json，",
+        "请选择用于存放收藏数据的目录（data 目录）。收藏列表保存在该目录下的 SQLite 数据库 library.db，视频封面保存在 thumbnails 子目录，",
         "Gemini 配置可放在该目录下的 .env 文件中（GEMINI_API_KEY / GEMINI_API_MODEL）。",
       ),
       h("div", { class: "row" }, input, h("button", { onclick: browse }, "浏览…")),
@@ -112,10 +160,17 @@ function statusBadge(v: Video) {
 }
 
 function card(v: Video) {
-  const img = h("img", { src: v.thumbnailUrl || thumbnailUrl(v.id), alt: v.title, loading: "lazy" });
-  img.addEventListener("error", () => {
-    if (!img.src.endsWith("/hqdefault.jpg")) img.src = thumbnailUrl(v.id);
-  });
+  const src = coverSrc(v);
+  const img = src
+    ? h("img", { src, alt: v.title, loading: "lazy" })
+    : h("div", { class: "cover-placeholder" }, "封面下载中…");
+  // Cached file vanished from disk: download it again.
+  if (src)
+    img.addEventListener("error", () => {
+      if (coverRetried.has(v.id)) return;
+      coverRetried.add(v.id);
+      void cacheThumbnail(v.id);
+    });
   return h(
     "article",
     { class: "card" },
@@ -221,8 +276,9 @@ async function addVideo(input: string): Promise<boolean> {
     return false;
   }
   state.videos = [newVideo(id), ...state.videos];
-  await persist();
+  await persist(id);
   renderGrid();
+  void cacheThumbnail(id);
   void processVideo(id);
   return true;
 }
@@ -245,7 +301,9 @@ async function processVideo(id: string, opts: { metadata?: boolean; transcript?:
             author: oembed?.author || meta.author,
           });
           refresh(id);
-          await persist();
+          await persist(id);
+          const cur = state.videos.find((x) => x.id === id);
+          if (cur && !cur.localThumbnail) void cacheThumbnail(id);
         })(),
       );
     }
@@ -255,7 +313,7 @@ async function processVideo(id: string, opts: { metadata?: boolean; transcript?:
           const transcript = await client.fetchTranscript(id);
           updateVideo(id, { transcript });
           refresh(id);
-          await persist();
+          await persist(id);
         })(),
       );
     }
@@ -268,7 +326,7 @@ async function processVideo(id: string, opts: { metadata?: boolean; transcript?:
     updateVideo(id, { status: "error", error: errMsg(e) });
     toast(`处理失败: ${errMsg(e)}`, "error");
   }
-  await persist();
+  await persist(id);
   refresh(id);
 }
 
@@ -353,9 +411,8 @@ function renderDetail(fresh = false) {
 
   const remove = async () => {
     if (!window.confirm(`确定删除「${v.title || v.id}」吗？`)) return;
-    state.videos = state.videos.filter((x) => x.id !== v.id);
     closeModal();
-    await persist();
+    await removeVideo(v.id);
     renderGrid();
   };
   const busy = v.status === "processing";
@@ -437,9 +494,12 @@ async function boot() {
     state.dataDir = settings.dataDir;
     if (!state.dataDir) return renderSetup();
     state.gemini = await backend.loadGeminiConfig();
-    const loaded = recoverInterrupted(await backend.loadLibrary());
-    state.videos = loaded;
+    const raw = await backend.loadLibrary();
+    state.videos = recoverInterrupted(raw);
     renderMain();
+    // Persist recovered entries, and download covers that aren't stored locally yet (e.g. migrated library.json data).
+    raw.filter((v) => v.status === "processing").forEach((v) => void persist(v.id));
+    state.videos.filter((v) => !v.localThumbnail).forEach((v) => void cacheThumbnail(v.id));
   } catch (e) {
     app.replaceChildren(
       h("div", { class: "setup" }, h("h1", {}, "启动失败"), h("p", {}, errMsg(e)), h("button", { onclick: () => renderSetup(true) }, "重新选择数据目录")),
