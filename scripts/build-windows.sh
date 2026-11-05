@@ -43,7 +43,7 @@ command -v cargo-xwin >/dev/null 2>&1 || cargo install --locked cargo-xwin
 
 cd "$ROOT"
 [[ -d node_modules ]] || npm install
-npm run build:windows
+npm run build:windows:cross
 
 echo
 echo ">> Installer:"
