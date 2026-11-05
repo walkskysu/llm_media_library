@@ -2,9 +2,13 @@
 //!
 //! Responsibilities:
 //! - remember the user-chosen data directory (stored in the OS app-config dir)
-//! - persist the video library (`library.json`) inside that data directory
+//! - persist the video library in SQLite (`library.db`) inside that data directory,
+//!   with cover images cached locally under `thumbnails/` (see [`db`])
 //! - load `GEMINI_API_KEY` / `GEMINI_API_MODEL` from a `.env` file
 
+pub mod db;
+
+use db::{Library, Video};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -12,7 +16,6 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 const SETTINGS_FILE: &str = "settings.json";
-const LIBRARY_FILE: &str = "library.json";
 const ENV_FILE: &str = ".env";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -155,28 +158,6 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-pub fn read_library_file(dir: &Path) -> Result<serde_json::Value, String> {
-    let path = dir.join(LIBRARY_FILE);
-    if !path.exists() {
-        return Ok(serde_json::json!([]));
-    }
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("library.json 解析失败: {e}"))?;
-    if !value.is_array() {
-        return Err("library.json 格式错误：应为数组".into());
-    }
-    Ok(value)
-}
-
-pub fn write_library_file(dir: &Path, videos: &serde_json::Value) -> Result<(), String> {
-    if !videos.is_array() {
-        return Err("videos must be an array".into());
-    }
-    let content = serde_json::to_string_pretty(videos).map_err(|e| e.to_string())?;
-    write_atomic(&dir.join(LIBRARY_FILE), &content)
-}
-
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Settings {
     read_settings(&app)
@@ -199,17 +180,53 @@ fn set_data_dir(app: AppHandle, path: String) -> Result<Settings, String> {
     };
     let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     write_atomic(&settings_path(&app)?, &content)?;
+    // Open once so the database is created / legacy JSON is migrated right away.
+    Library::open(&dir)?;
+    allow_thumbnail_dir(&app, &dir);
     Ok(settings)
 }
 
-#[tauri::command]
-fn load_library(app: AppHandle) -> Result<serde_json::Value, String> {
-    read_library_file(&data_dir(&app)?)
+/// Let the webview load cached cover images through the asset protocol.
+fn allow_thumbnail_dir(app: &AppHandle, dir: &Path) {
+    let thumbs = dir.join(db::THUMB_DIR);
+    let _ = fs::create_dir_all(&thumbs);
+    if let Err(e) = app.asset_protocol_scope().allow_directory(&thumbs, true) {
+        eprintln!("failed to allow thumbnail dir in asset scope: {e}");
+    }
+}
+
+/// Run a blocking library operation off the main thread.
+async fn with_library<T, F>(app: AppHandle, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&Library) -> Result<T, String> + Send + 'static,
+{
+    let dir = data_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || f(&Library::open(&dir)?))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn save_library(app: AppHandle, videos: serde_json::Value) -> Result<(), String> {
-    write_library_file(&data_dir(&app)?, &videos)
+async fn load_library(app: AppHandle) -> Result<Vec<Video>, String> {
+    allow_thumbnail_dir(&app, &data_dir(&app)?);
+    with_library(app, |lib| lib.list()).await
+}
+
+#[tauri::command]
+async fn save_video(app: AppHandle, video: Video) -> Result<(), String> {
+    with_library(app, move |lib| lib.upsert(&video)).await
+}
+
+#[tauri::command]
+async fn delete_video(app: AppHandle, id: String) -> Result<(), String> {
+    with_library(app, move |lib| lib.delete(&id)).await
+}
+
+/// Download the cover image to `数据目录/thumbnails/` and return its absolute path.
+#[tauri::command]
+async fn cache_thumbnail(app: AppHandle, id: String, urls: Vec<String>) -> Result<String, String> {
+    with_library(app, move |lib| lib.cache_thumbnail(&id, &urls)).await
 }
 
 fn env_candidates(app: &AppHandle) -> Vec<PathBuf> {
@@ -265,7 +282,9 @@ pub fn run() {
             get_settings,
             set_data_dir,
             load_library,
-            save_library,
+            save_video,
+            delete_video,
+            cache_thumbnail,
             load_gemini_config,
             save_gemini_config
         ])
@@ -314,18 +333,5 @@ mod tests {
         assert_eq!(cfg.api_key.as_deref(), Some("key-b"));
         assert_eq!(cfg.model.as_deref(), Some("model-b"));
         assert_eq!(cfg.source, Some(b.display().to_string()));
-    }
-
-    #[test]
-    fn library_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            read_library_file(dir.path()).unwrap(),
-            serde_json::json!([])
-        );
-        let videos = serde_json::json!([{ "id": "abc", "title": "t" }]);
-        write_library_file(dir.path(), &videos).unwrap();
-        assert_eq!(read_library_file(dir.path()).unwrap(), videos);
-        assert!(write_library_file(dir.path(), &serde_json::json!({})).is_err());
     }
 }

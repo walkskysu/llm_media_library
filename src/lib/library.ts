@@ -38,3 +38,19 @@ export function recoverInterrupted(videos: Video[]): Video[] {
     v.status === "processing" ? { ...v, status: "error", error: "处理被中断，请点击重试" } : v,
   );
 }
+
+/** Cover URLs to try (in order) when caching a video's cover image locally. */
+export function thumbnailCandidates(v: Pick<Video, "id" | "thumbnailUrl">): string[] {
+  const urls = [v.thumbnailUrl, thumbnailUrl(v.id, "maxres"), thumbnailUrl(v.id, "hq")];
+  return [...new Set(urls.filter((u) => u.startsWith("https://")))];
+}
+
+/** Serialises async tasks so writes reach the database in the order they were issued. */
+export function createQueue() {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const run = tail.then(task, task);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}

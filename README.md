@@ -8,7 +8,7 @@
 - 输入 YouTube 链接（`watch?v=`、`youtu.be/`、`shorts/`、`live/`、`embed/` 或直接输入视频 ID）即可收藏
 - 使用 `@google/genai` 调用 Gemini（`GEMINI_API_KEY` / `GEMINI_API_MODEL`）获取：
   封面、标题、作者、发布时间、视频时长、视频介绍
-  - 封面直接使用 `i.ytimg.com` 的缩略图；标题/作者另外用 YouTube oEmbed 校正（尽力而为）
+  - 封面从 `i.ytimg.com` 下载并保存到数据目录的 `thumbnails/` 中，界面始终从本地加载；标题/作者另外用 YouTube oEmbed 校正（尽力而为）
 - 使用 Issue 中给定的提示词，让 Gemini 直接“观看”视频并生成时间戳逐字稿
 - 首页以卡片式网格（Card-based Grid Layout）展示所有收藏，支持搜索
 - 点击封面打开详情：内嵌播放器播放、查看完整信息与逐字稿；**点击逐字稿中的时间戳可跳转播放**
@@ -22,8 +22,12 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `library.json` | 收藏的视频列表（含元数据与逐字稿） |
+| `library.db` | SQLite 数据库，保存收藏的视频列表（含元数据与逐字稿） |
+| `thumbnails/` | 视频封面图（本地保存，界面只从本地加载封面） |
 | `.env` | Gemini 配置（可在设置界面中填写后自动写入） |
+
+> 从旧版本升级：若数据目录中存在旧的 `library.json`，首次打开时会自动导入到 `library.db`，
+> 并将原文件重命名为 `library.json.migrated`；缺失的封面会在后台自动下载到 `thumbnails/`。
 
 ## Gemini 配置（.env）
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterVideos, newVideo, recoverInterrupted, sortVideos } from "../src/lib/library";
+import { createQueue, filterVideos, newVideo, recoverInterrupted, sortVideos, thumbnailCandidates } from "../src/lib/library";
 
 describe("library", () => {
   const a = { ...newVideo("aaaaaaaaaaa", new Date("2024-01-01")), title: "Rust tips", status: "ready" as const };
@@ -20,5 +20,32 @@ describe("library", () => {
     const [ra, rb] = recoverInterrupted([a, b]);
     expect(ra.status).toBe("ready");
     expect(rb.status).toBe("error");
+  });
+});
+
+describe("thumbnailCandidates", () => {
+  it("prefers the stored url and dedupes fallbacks", () => {
+    const v = newVideo("aaaaaaaaaaa");
+    expect(thumbnailCandidates(v)).toEqual([
+      "https://i.ytimg.com/vi/aaaaaaaaaaa/hqdefault.jpg",
+      "https://i.ytimg.com/vi/aaaaaaaaaaa/maxresdefault.jpg",
+    ]);
+    expect(thumbnailCandidates({ ...v, thumbnailUrl: "" })[0]).toContain("maxresdefault");
+  });
+});
+
+describe("createQueue", () => {
+  it("runs tasks sequentially even if one fails", async () => {
+    const enqueue = createQueue();
+    const log: string[] = [];
+    const slow = enqueue(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      log.push("a");
+      throw new Error("x");
+    });
+    const fast = enqueue(async () => log.push("b"));
+    await expect(slow).rejects.toThrow("x");
+    await fast;
+    expect(log).toEqual(["a", "b"]);
   });
 });

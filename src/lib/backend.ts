@@ -5,7 +5,10 @@ export const backend = {
   getSettings: () => invoke<Settings>("get_settings"),
   setDataDir: (path: string) => invoke<Settings>("set_data_dir", { path }),
   loadLibrary: () => invoke<Video[]>("load_library"),
-  saveLibrary: (videos: Video[]) => invoke<void>("save_library", { videos }),
+  saveVideo: (video: Video) => invoke<void>("save_video", { video }),
+  deleteVideo: (id: string) => invoke<void>("delete_video", { id }),
+  /** Download the cover into the data directory; resolves to the local file path. */
+  cacheThumbnail: (id: string, urls: string[]) => invoke<string>("cache_thumbnail", { id, urls }),
   loadGeminiConfig: () => invoke<GeminiConfig>("load_gemini_config"),
   saveGeminiConfig: (apiKey: string, model: string) =>
     invoke<GeminiConfig>("save_gemini_config", { apiKey, model }),
