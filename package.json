@@ -10,7 +10,9 @@
     "typecheck": "tsc",
     "test": "vitest run",
     "tauri": "tauri",
-    "build:windows": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc"
+    "build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles nsis",
+    "build:windows:msi": "tauri build --target x86_64-pc-windows-msvc --bundles msi",
+    "build:windows:cross": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc"
   },
   "dependencies": {
     "@google/genai": "^2.32.0",

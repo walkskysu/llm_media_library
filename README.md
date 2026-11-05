@@ -53,6 +53,27 @@ npm run typecheck      # TypeScript 类型检查
 cd src-tauri && cargo test   # Rust 单元测试
 ```
 
+## 在 Windows 上构建 Windows 安装包
+
+前置条件：Node.js 20+、Rust（rustup，MSVC 工具链）、Visual Studio Build Tools
+（勾选“使用 C++ 的桌面开发”），详见 [Tauri 前置条件](https://tauri.app/start/prerequisites/#windows)。
+Windows 本机构建直接使用 MSVC，**不需要** `cargo-xwin`。
+
+```powershell
+npm.cmd install
+npm.cmd run build:windows        # NSIS 安装包（.exe）
+npm.cmd run build:windows:msi    # 可选：MSI 安装包（首次会自动下载 WiX）
+```
+
+或使用一键脚本（会检查工具链、安装 Rust 目标、按需 `npm install`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1        # NSIS
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Msi   # MSI
+```
+
+生成的安装包位于 `src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\`（或 `bundle\msi\`）。
+
 ## 在 Linux 上交叉编译 Windows 安装包
 
 参考 [Tauri 官方文档](https://tauri.app/distribute/windows-installer/#build-windows-apps-on-linux-and-macos)，
@@ -66,7 +87,7 @@ cd src-tauri && cargo test   # Rust 单元测试
 
 脚本会检查 `makensis` / `llvm-rc` / `lld-link` / `clang-cl`，缺失时通过 `apt-get download`
 下载并解压到 `~/.local/xtools`（不需要 sudo），然后安装 `x86_64-pc-windows-msvc` 目标与
-`cargo-xwin` 并执行构建。
+`cargo-xwin` 并执行构建（`npm run build:windows:cross`）。
 
 **手动步骤：**
 
@@ -78,7 +99,7 @@ rustup target add x86_64-pc-windows-msvc
 cargo install --locked cargo-xwin
 # 3. 构建
 npm install
-npm run build:windows
+npm run build:windows:cross
 ```
 
 生成的安装包位于：
