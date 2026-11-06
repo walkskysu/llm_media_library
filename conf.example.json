@@ -1,0 +1,4 @@
+{
+  "GEMINI_API_KEY": "your-gemini-api-key",
+  "GEMINI_API_MODEL": "gemini-2.5-flash"
+}
