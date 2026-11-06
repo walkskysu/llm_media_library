@@ -1,0 +1,104 @@
+name: Release
+
+# Push a tag like `v0.2.0` (after bumping the version with
+# `npm run version:set -- 0.2.0`) to build the Windows installers and
+# create a *draft* GitHub Release. Review the draft, then click "Publish".
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and release, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    name: Verify version & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tag must match the app version
+        run: node scripts/version.mjs check "$TAG"
+      - run: npm run typecheck
+      - run: npm test
+
+  build-windows:
+    name: Build Windows installers
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+      - run: npm ci
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+      - name: Build NSIS + MSI installers
+        run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          if-no-files-found: error
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+  release:
+    name: Create GitHub Release (draft)
+    needs: build-windows
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installers
+          path: dist-release
+      - name: Collect files and checksums
+        run: |
+          mkdir -p upload
+          find dist-release -type f \( -name '*.exe' -o -name '*.msi' \) -exec cp {} upload/ \;
+          cd upload
+          sha256sum * > SHA256SUMS.txt
+          ls -l
+      - name: Create or update release
+        run: |
+          VERSION="${TAG#v}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; replacing assets"
+            gh release upload "$TAG" upload/* --clobber
+          else
+            flags=(--draft --generate-notes --verify-tag --title "LLM Media Library $TAG")
+            if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$TAG" upload/* "${flags[@]}"
+          fi
