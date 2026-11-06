@@ -138,7 +138,7 @@ async function renderSetup(changing = false) {
         "p",
         {},
         "请选择用于存放收藏数据的目录（data 目录）。收藏列表保存在该目录下的 SQLite 数据库 library.db，视频封面保存在 thumbnails 子目录，",
-        "Gemini 配置可放在该目录下的 .env 文件中（GEMINI_API_KEY / GEMINI_API_MODEL）。",
+        "Gemini 配置可放在该目录下的 conf.json 文件中（GEMINI_API_KEY / GEMINI_API_MODEL）。",
       ),
       h("div", { class: "row" }, input, h("button", { onclick: browse }, "浏览…")),
       h(
@@ -243,7 +243,7 @@ function renderMain() {
       ? h(
           "div",
           { class: "warning" },
-          "未找到 GEMINI_API_KEY。请在 数据目录/.env 中配置，或点击右上角 设置 填写。",
+          "未找到 GEMINI_API_KEY。请在 数据目录/conf.json 中配置，或点击右上角 设置 填写。",
         )
       : "",
     h("div", { class: "toolbar" }, h("span", { id: "count" }), search),
@@ -461,7 +461,7 @@ function openSettings() {
   const save = async () => {
     try {
       state.gemini = await backend.saveGeminiConfig(key.value, model.value);
-      toast("已保存到 数据目录/.env");
+      toast("已保存到 数据目录/conf.json");
       closeModal();
       renderMain();
     } catch (e) {
@@ -481,7 +481,7 @@ function openSettings() {
       h("p", { class: "muted" }, `当前配置来源：${state.gemini.source ?? "未找到"}`),
       h("label", {}, "GEMINI_API_KEY", key),
       h("label", {}, "GEMINI_API_MODEL", model),
-      h("div", { class: "row end" }, h("button", { class: "ghost", onclick: closeModal }, "取消"), h("button", { class: "primary", onclick: save }, "保存到数据目录 .env")),
+      h("div", { class: "row end" }, h("button", { class: "ghost", onclick: closeModal }, "取消"), h("button", { class: "primary", onclick: save }, "保存到数据目录 conf.json")),
     ),
   );
 }

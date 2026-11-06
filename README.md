@@ -24,26 +24,31 @@
 | --- | --- |
 | `library.db` | SQLite 数据库，保存收藏的视频列表（含元数据与逐字稿） |
 | `thumbnails/` | 视频封面图（本地保存，界面只从本地加载封面） |
-| `.env` | Gemini 配置（可在设置界面中填写后自动写入） |
+| `conf.json` | Gemini 配置（可在设置界面中填写后自动写入） |
 
 > 从旧版本升级：若数据目录中存在旧的 `library.json`，首次打开时会自动导入到 `library.db`，
 > 并将原文件重命名为 `library.json.migrated`；缺失的封面会在后台自动下载到 `thumbnails/`。
 
-## Gemini 配置（.env）
+## Gemini 配置（conf.json）
 
-```env
-GEMINI_API_KEY=your-gemini-api-key
-GEMINI_API_MODEL=gemini-2.5-flash
+```json
+{
+  "GEMINI_API_KEY": "your-gemini-api-key",
+  "GEMINI_API_MODEL": "gemini-2.5-flash"
+}
 ```
 
-应用按以下顺序查找 `.env`（每个键取第一个非空值）：
+可参考仓库根目录的 `conf.example.json`。应用按以下顺序查找 `conf.json`（每个键取第一个非空值）：
 
-1. `数据目录\.env`
-2. 应用程序 exe 所在目录下的 `.env`
-3. 当前工作目录（及其上级目录，便于 `tauri dev` 使用项目根目录的 `.env`）
+1. `数据目录\conf.json`
+2. 应用程序 exe 所在目录下的 `conf.json`
+3. 当前工作目录（及其上级目录，便于 `tauri dev` 使用项目根目录的 `conf.json`）
 4. 系统环境变量 `GEMINI_API_KEY` / `GEMINI_API_MODEL`
 
 未设置 `GEMINI_API_MODEL` 时默认使用 `gemini-2.5-flash`。
+
+> 从旧版本升级：若数据目录中只有旧的 `.env` 而没有 `conf.json`，启动时会自动将其中的
+> `GEMINI_API_KEY` / `GEMINI_API_MODEL` 转换写入 `conf.json`（原 `.env` 保留不删除）。
 
 ## 开发
 
@@ -159,6 +164,6 @@ src/                 前端（TypeScript，无框架）
   lib/metadata.ts    Gemini JSON 响应解析与规范化
   lib/library.ts     收藏列表工具函数
   lib/backend.ts     Tauri 命令封装
-src-tauri/           Rust 后端：数据目录、library.json 读写、.env 解析
+src-tauri/           Rust 后端：数据目录、SQLite 读写、conf.json 配置解析
 tests/               vitest 单元测试
 ```

@@ -4,19 +4,24 @@
 //! - remember the user-chosen data directory (stored in the OS app-config dir)
 //! - persist the video library in SQLite (`library.db`) inside that data directory,
 //!   with cover images cached locally under `thumbnails/` (see [`db`])
-//! - load `GEMINI_API_KEY` / `GEMINI_API_MODEL` from a `.env` file
+//! - load `GEMINI_API_KEY` / `GEMINI_API_MODEL` from a `conf.json` file
+//!   (a legacy `.env` in the data directory is migrated automatically)
 
 pub mod db;
 
 use db::{Library, Video};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 const SETTINGS_FILE: &str = "settings.json";
-const ENV_FILE: &str = ".env";
+const CONF_FILE: &str = "conf.json";
+const LEGACY_ENV_FILE: &str = ".env";
+const KEY_API_KEY: &str = "GEMINI_API_KEY";
+const KEY_MODEL: &str = "GEMINI_API_MODEL";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -33,8 +38,10 @@ pub struct GeminiConfig {
     pub source: Option<String>,
 }
 
-/// Parse the contents of a `.env` file (KEY=VALUE lines, `#` comments,
+/// Parse the contents of a legacy `.env` file (KEY=VALUE lines, `#` comments,
 /// optional `export ` prefix, optional single/double quotes).
+///
+/// Only used to migrate old `.env` files to `conf.json`.
 pub fn parse_env(content: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for raw in content.lines() {
@@ -64,50 +71,84 @@ pub fn parse_env(content: &str) -> HashMap<String, String> {
     map
 }
 
-/// Merge-update a `.env` file body, replacing existing keys and appending new ones.
-pub fn update_env(content: &str, updates: &[(&str, &str)]) -> String {
-    let mut remaining: Vec<(&str, &str)> = updates.to_vec();
-    let mut out: Vec<String> = Vec::new();
-    for raw in content.lines() {
-        let trimmed = raw.trim();
-        let key = trimmed
-            .strip_prefix("export ")
-            .unwrap_or(trimmed)
-            .split_once('=')
-            .map(|(k, _)| k.trim());
-        if let Some(key) = key
-            && !trimmed.starts_with('#')
-            && let Some(pos) = remaining.iter().position(|(k, _)| *k == key)
-        {
-            let (k, v) = remaining.remove(pos);
-            out.push(format!("{k}={v}"));
-            continue;
-        }
-        out.push(raw.to_string());
+/// Parse a `conf.json` body into a JSON object. Invalid JSON or a non-object
+/// top level is reported as an error.
+pub fn parse_conf(content: &str) -> Result<Map<String, Value>, String> {
+    if content.trim().is_empty() {
+        return Ok(Map::new());
     }
-    for (k, v) in remaining {
-        out.push(format!("{k}={v}"));
+    match serde_json::from_str::<Value>(content) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Err("conf.json 顶层必须是 JSON 对象".into()),
+        Err(e) => Err(format!("conf.json 格式错误: {e}")),
     }
-    let mut s = out.join("\n");
-    s.push('\n');
-    s
 }
 
-fn non_empty(v: Option<&String>) -> Option<String> {
+/// Merge-update a `conf.json` body, replacing existing keys, adding new ones
+/// and keeping every other key untouched. Returns pretty-printed JSON.
+pub fn update_conf(content: &str, updates: &[(&str, &str)]) -> Result<String, String> {
+    let mut map = parse_conf(content)?;
+    for (k, v) in updates {
+        map.insert((*k).to_string(), Value::String((*v).to_string()));
+    }
+    let mut s = serde_json::to_string_pretty(&Value::Object(map)).map_err(|e| e.to_string())?;
+    s.push('\n');
+    Ok(s)
+}
+
+/// Convert legacy `.env` contents to a `conf.json` body (only the Gemini keys).
+pub fn env_to_conf(content: &str) -> Result<String, String> {
+    let env = parse_env(content);
+    let updates: Vec<(&str, &str)> = [KEY_API_KEY, KEY_MODEL]
+        .iter()
+        .filter_map(|k| env.get(*k).map(|v| (*k, v.as_str())))
+        .collect();
+    update_conf("", &updates)
+}
+
+/// If `dir/conf.json` does not exist but a legacy `dir/.env` does, create
+/// `conf.json` from it. The old `.env` is left in place.
+pub fn migrate_legacy_env(dir: &Path) -> Result<bool, String> {
+    let conf = dir.join(CONF_FILE);
+    let legacy = dir.join(LEGACY_ENV_FILE);
+    if conf.exists() {
+        return Ok(false);
+    }
+    let Ok(content) = fs::read_to_string(&legacy) else {
+        return Ok(false);
+    };
+    write_atomic(&conf, &env_to_conf(&content)?)?;
+    Ok(true)
+}
+
+fn conf_str(map: &Map<String, Value>, key: &str) -> Option<String> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn non_empty(v: Option<String>) -> Option<String> {
     v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Resolve Gemini settings from a list of candidate `.env` files (first hit wins
-/// per key) and finally from process environment variables.
+/// Resolve Gemini settings from a list of candidate `conf.json` files (first hit
+/// wins per key) and finally from process environment variables.
 pub fn resolve_gemini_config(candidates: &[PathBuf]) -> GeminiConfig {
     let mut cfg = GeminiConfig::default();
     for path in candidates {
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
-        let env = parse_env(&content);
-        let key = non_empty(env.get("GEMINI_API_KEY"));
-        let model = non_empty(env.get("GEMINI_API_MODEL"));
+        let conf = match parse_conf(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ignoring {}: {e}", path.display());
+                continue;
+            }
+        };
+        let key = conf_str(&conf, KEY_API_KEY);
+        let model = conf_str(&conf, KEY_MODEL);
         if cfg.api_key.is_none() && key.is_some() {
             cfg.api_key = key;
             cfg.source = Some(path.display().to_string());
@@ -117,13 +158,13 @@ pub fn resolve_gemini_config(candidates: &[PathBuf]) -> GeminiConfig {
         }
     }
     if cfg.api_key.is_none()
-        && let Some(key) = non_empty(std::env::var("GEMINI_API_KEY").ok().as_ref())
+        && let Some(key) = non_empty(std::env::var(KEY_API_KEY).ok())
     {
         cfg.api_key = Some(key);
         cfg.source = Some("environment variable".into());
     }
     if cfg.model.is_none() {
-        cfg.model = non_empty(std::env::var("GEMINI_API_MODEL").ok().as_ref());
+        cfg.model = non_empty(std::env::var(KEY_MODEL).ok());
     }
     cfg
 }
@@ -229,21 +270,24 @@ async fn cache_thumbnail(app: AppHandle, id: String, urls: Vec<String>) -> Resul
     with_library(app, move |lib| lib.cache_thumbnail(&id, &urls)).await
 }
 
-fn env_candidates(app: &AppHandle) -> Vec<PathBuf> {
+fn conf_candidates(app: &AppHandle) -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Ok(dir) = data_dir(app) {
-        v.push(dir.join(ENV_FILE));
+        if let Err(e) = migrate_legacy_env(&dir) {
+            eprintln!("failed to migrate legacy .env: {e}");
+        }
+        v.push(dir.join(CONF_FILE));
     }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        v.push(dir.join(ENV_FILE));
+        v.push(dir.join(CONF_FILE));
     }
     if let Ok(cwd) = std::env::current_dir() {
-        v.push(cwd.join(ENV_FILE));
-        // `tauri dev` runs inside src-tauri/, the project .env lives one level up.
+        v.push(cwd.join(CONF_FILE));
+        // `tauri dev` runs inside src-tauri/, the project conf.json lives one level up.
         if let Some(parent) = cwd.parent() {
-            v.push(parent.join(ENV_FILE));
+            v.push(parent.join(CONF_FILE));
         }
     }
     v
@@ -251,7 +295,7 @@ fn env_candidates(app: &AppHandle) -> Vec<PathBuf> {
 
 #[tauri::command]
 fn load_gemini_config(app: AppHandle) -> GeminiConfig {
-    resolve_gemini_config(&env_candidates(&app))
+    resolve_gemini_config(&conf_candidates(&app))
 }
 
 #[tauri::command]
@@ -260,17 +304,16 @@ fn save_gemini_config(
     api_key: String,
     model: String,
 ) -> Result<GeminiConfig, String> {
-    let path = data_dir(&app)?.join(ENV_FILE);
+    let dir = data_dir(&app)?;
+    migrate_legacy_env(&dir)?;
+    let path = dir.join(CONF_FILE);
     let existing = fs::read_to_string(&path).unwrap_or_default();
-    let body = update_env(
+    let body = update_conf(
         &existing,
-        &[
-            ("GEMINI_API_KEY", api_key.trim()),
-            ("GEMINI_API_MODEL", model.trim()),
-        ],
-    );
+        &[(KEY_API_KEY, api_key.trim()), (KEY_MODEL, model.trim())],
+    )?;
     write_atomic(&path, &body)?;
-    Ok(resolve_gemini_config(&env_candidates(&app)))
+    Ok(resolve_gemini_config(&conf_candidates(&app)))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -310,28 +353,72 @@ mod tests {
     }
 
     #[test]
-    fn updates_env_preserving_other_lines() {
-        let out = update_env(
-            "# keep\nFOO=1\nGEMINI_API_KEY=old\n",
+    fn updates_conf_preserving_other_keys() {
+        let out = update_conf(
+            "{\"FOO\": 1, \"GEMINI_API_KEY\": \"old\"}",
             &[("GEMINI_API_KEY", "new"), ("GEMINI_API_MODEL", "m")],
-        );
-        assert_eq!(
-            out,
-            "# keep\nFOO=1\nGEMINI_API_KEY=new\nGEMINI_API_MODEL=m\n"
-        );
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["FOO"], 1);
+        assert_eq!(v["GEMINI_API_KEY"], "new");
+        assert_eq!(v["GEMINI_API_MODEL"], "m");
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn update_conf_rejects_invalid_json() {
+        assert!(update_conf("not json", &[("A", "b")]).is_err());
+        assert!(update_conf("[1, 2]", &[("A", "b")]).is_err());
+        assert!(update_conf("", &[("A", "b")]).is_ok());
     }
 
     #[test]
     fn resolves_config_first_file_wins() {
         let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.env");
-        let b = dir.path().join("b.env");
-        fs::write(&a, "GEMINI_API_KEY=\n").unwrap();
-        fs::write(&b, "GEMINI_API_KEY=key-b\nGEMINI_API_MODEL=model-b\n").unwrap();
-        let missing = dir.path().join("missing.env");
-        let cfg = resolve_gemini_config(&[missing, a, b.clone()]);
+        let a = dir.path().join("a.json");
+        let b = dir.path().join("b.json");
+        let bad = dir.path().join("bad.json");
+        fs::write(&a, r#"{"GEMINI_API_KEY": ""}"#).unwrap();
+        fs::write(&bad, "{oops").unwrap();
+        fs::write(
+            &b,
+            r#"{"GEMINI_API_KEY": "key-b", "GEMINI_API_MODEL": "model-b"}"#,
+        )
+        .unwrap();
+        let missing = dir.path().join("missing.json");
+        let cfg = resolve_gemini_config(&[missing, a, bad, b.clone()]);
         assert_eq!(cfg.api_key.as_deref(), Some("key-b"));
         assert_eq!(cfg.model.as_deref(), Some("model-b"));
         assert_eq!(cfg.source, Some(b.display().to_string()));
+    }
+
+    #[test]
+    fn migrates_legacy_env_once() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".env"),
+            "# c\nGEMINI_API_KEY=abc\nGEMINI_API_MODEL=m1\nOTHER=x\n",
+        )
+        .unwrap();
+        assert!(migrate_legacy_env(dir.path()).unwrap());
+        let conf = dir.path().join("conf.json");
+        let cfg = resolve_gemini_config(std::slice::from_ref(&conf));
+        assert_eq!(cfg.api_key.as_deref(), Some("abc"));
+        assert_eq!(cfg.model.as_deref(), Some("m1"));
+        let v: Value = serde_json::from_str(&fs::read_to_string(&conf).unwrap()).unwrap();
+        assert!(v.get("OTHER").is_none());
+        // Existing conf.json is never overwritten.
+        fs::write(&conf, r#"{"GEMINI_API_KEY": "kept"}"#).unwrap();
+        assert!(!migrate_legacy_env(dir.path()).unwrap());
+        let cfg = resolve_gemini_config(&[conf]);
+        assert_eq!(cfg.api_key.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn no_migration_without_legacy_env() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!migrate_legacy_env(dir.path()).unwrap());
+        assert!(!dir.path().join("conf.json").exists());
     }
 }
