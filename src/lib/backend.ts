@@ -12,4 +12,8 @@ export const backend = {
   loadGeminiConfig: () => invoke<GeminiConfig>("load_gemini_config"),
   saveGeminiConfig: (apiKey: string, model: string) =>
     invoke<GeminiConfig>("save_gemini_config", { apiKey, model }),
+  /** Raw GitHub API JSON of the latest published release, or null if none. */
+  fetchLatestRelease: () => invoke<unknown | null>("fetch_latest_release"),
+  /** Download the installer, launch it and quit the app; resolves to the downloaded file path. */
+  installUpdate: (url: string) => invoke<string>("install_update", { url }),
 };

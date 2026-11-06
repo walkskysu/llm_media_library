@@ -6,8 +6,10 @@
 //!   with cover images cached locally under `thumbnails/` (see [`db`])
 //! - load `GEMINI_API_KEY` / `GEMINI_API_MODEL` from a `conf.json` file
 //!   (a legacy `.env` in the data directory is migrated automatically)
+//! - check GitHub Releases for a newer version and install it (see [`updater`])
 
 pub mod db;
+pub mod updater;
 
 use db::{Library, Video};
 use serde::{Deserialize, Serialize};
@@ -316,6 +318,34 @@ fn save_gemini_config(
     Ok(resolve_gemini_config(&conf_candidates(&app)))
 }
 
+/// Raw JSON of the latest GitHub release (`null` if there is none yet).
+#[tauri::command]
+async fn fetch_latest_release() -> Result<Option<Value>, String> {
+    tauri::async_runtime::spawn_blocking(updater::fetch_latest_release)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Download the installer to the temp directory, start it and quit the app so
+/// the installer can replace the program files.
+#[tauri::command]
+async fn install_update(app: AppHandle, url: String) -> Result<String, String> {
+    let dir = std::env::temp_dir().join("llm-media-library-update");
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        let path = updater::download_installer(&url, &dir)?;
+        updater::launch_installer(&path)?;
+        Ok::<_, String>(path)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        handle.exit(0);
+    });
+    Ok(path.display().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -329,7 +359,9 @@ pub fn run() {
             delete_video,
             cache_thumbnail,
             load_gemini_config,
-            save_gemini_config
+            save_gemini_config,
+            fetch_latest_release,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,6 +2,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { documentDir, join } from "@tauri-apps/api/path";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { backend } from "./lib/backend";
 import { DEFAULT_MODEL, fetchOEmbed, GeminiClient } from "./lib/gemini";
 import { createQueue, filterVideos, newVideo, recoverInterrupted, sortVideos, thumbnailCandidates } from "./lib/library";
@@ -9,6 +10,7 @@ import { formatDuration } from "./lib/format";
 import { parseTranscript } from "./lib/transcript";
 import type { GeminiConfig, Video } from "./lib/types";
 import { embedUrl, extractVideoId } from "./lib/youtube";
+import { evaluateUpdate, RELEASES_URL, type UpdateCheck } from "./lib/update";
 
 const state = {
   dataDir: null as string | null,
@@ -16,6 +18,14 @@ const state = {
   videos: [] as Video[],
   query: "",
   openId: null as string | null,
+  appVersion: "",
+  update: {
+    checking: false,
+    installing: false,
+    result: null as UpdateCheck | null,
+    error: null as string | null,
+    checkedAt: null as Date | null,
+  },
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -237,7 +247,7 @@ function renderMain() {
       { class: "topbar" },
       h("div", { class: "brand" }, "🎬 LLM Media Library"),
       h("form", { class: "add-form", onsubmit: submit }, urlInput, h("button", { class: "primary", type: "submit" }, "收藏")),
-      h("button", { class: "ghost", onclick: openSettings, title: "设置" }, "⚙ 设置"),
+      h("button", { class: "ghost", id: "settings-btn", onclick: openSettings, title: "设置" }, "⚙ 设置"),
     ),
     !state.gemini.apiKey
       ? h(
@@ -250,6 +260,17 @@ function renderMain() {
     h("main", { id: "grid", class: "grid" }),
   );
   renderGrid();
+  renderUpdateDot();
+}
+
+/** Mark the settings button when a newer release is available. */
+function renderUpdateDot() {
+  const btn = document.querySelector<HTMLButtonElement>("#settings-btn");
+  if (!btn) return;
+  const has = !!state.update.result?.hasUpdate;
+  btn.title = has ? `有新版本可用：${state.update.result?.latest?.tag}` : "设置";
+  btn.querySelector(".update-dot")?.remove();
+  if (has) btn.append(h("span", { class: "update-dot" }));
 }
 
 // ---------- add & process ----------
@@ -452,6 +473,100 @@ function renderDetail(fresh = false) {
   );
 }
 
+// ---------- updates ----------
+
+async function checkForUpdate(opts: { silent?: boolean } = {}) {
+  if (state.update.checking) return;
+  state.update.checking = true;
+  state.update.error = null;
+  renderUpdateSection();
+  try {
+    if (!state.appVersion) state.appVersion = await getVersion();
+    const raw = await backend.fetchLatestRelease();
+    state.update.result = evaluateUpdate(state.appVersion, raw);
+    state.update.checkedAt = new Date();
+    if (!opts.silent && !state.update.result.hasUpdate) toast("当前已是最新版本");
+  } catch (e) {
+    state.update.error = errMsg(e);
+    if (!opts.silent) toast(state.update.error, "error");
+  } finally {
+    state.update.checking = false;
+    renderUpdateSection();
+    renderUpdateDot();
+  }
+}
+
+async function installUpdate() {
+  const r = state.update.result;
+  if (!r?.hasUpdate || !r.latest || state.update.installing) return;
+  if (!r.installer) {
+    void openUrl(r.latest.url).catch(() => {});
+    return;
+  }
+  if (!window.confirm(`下载并安装 ${r.latest.tag}？\n安装程序启动后应用将自动退出。`)) return;
+  state.update.installing = true;
+  renderUpdateSection();
+  try {
+    await backend.installUpdate(r.installer.url);
+    toast("安装程序已启动，应用即将退出…");
+  } catch (e) {
+    toast(errMsg(e), "error");
+  } finally {
+    state.update.installing = false;
+    renderUpdateSection();
+  }
+}
+
+function formatSize(bytes: number) {
+  return bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : "";
+}
+
+/** (Re)render the 版本与更新 block inside the settings modal, if it is open. */
+function renderUpdateSection() {
+  const box = document.querySelector<HTMLDivElement>("#update-section");
+  if (!box) return;
+  const u = state.update;
+  const r = u.result;
+  let status: Node;
+  if (u.checking) status = h("p", { class: "muted" }, "正在检查更新…");
+  else if (u.error) status = h("p", { class: "update-error" }, `检查更新失败：${u.error}`);
+  else if (!r) status = h("p", { class: "muted" }, "尚未检查更新");
+  else if (!r.latest) status = h("p", { class: "muted" }, "GitHub 上暂无已发布的版本");
+  else if (!r.hasUpdate) status = h("p", { class: "muted" }, `当前已是最新版本（最新发布：${r.latest.tag}）`);
+  else {
+    const l = r.latest;
+    status = h(
+      "div",
+      { class: "update-info" },
+      h("p", {}, h("strong", {}, `发现新版本 ${l.tag}`), l.name !== l.tag ? `（${l.name}）` : "",
+        l.publishedAt ? h("span", { class: "muted" }, ` · 发布于 ${new Date(l.publishedAt).toLocaleDateString()}`) : ""),
+      l.notes.trim() ? h("details", {}, h("summary", {}, "更新说明"), h("pre", {}, l.notes.trim())) : null,
+      r.installer
+        ? h("p", { class: "muted" }, `安装包：${r.installer.name} ${formatSize(r.installer.size)}`)
+        : h("p", { class: "muted" }, "该版本未提供 Windows 安装包，可前往发布页面手动下载。"),
+    );
+  }
+  const actions = h(
+    "div",
+    { class: "row end" },
+    h("button", { class: "ghost", onclick: () => openUrl(r?.latest?.url ?? RELEASES_URL).catch(() => {}) }, "发布页面"),
+    h("button", { onclick: () => void checkForUpdate(), disabled: u.checking || u.installing }, u.checking ? "检查中…" : "检查升级"),
+    r?.hasUpdate
+      ? h(
+          "button",
+          { class: "primary", onclick: () => void installUpdate(), disabled: u.installing },
+          u.installing ? "正在下载…" : r.installer ? "安装更新" : "前往下载",
+        )
+      : null,
+  );
+  box.replaceChildren(
+    h("p", {}, `当前版本：v${state.appVersion || "?"}`,
+      u.checkedAt ? h("span", { class: "muted" }, ` · 上次检查：${u.checkedAt.toLocaleTimeString()}`) : ""),
+    status,
+    actions,
+  );
+}
+
 // ---------- settings ----------
 
 function openSettings() {
@@ -482,8 +597,14 @@ function openSettings() {
       h("label", {}, "GEMINI_API_KEY", key),
       h("label", {}, "GEMINI_API_MODEL", model),
       h("div", { class: "row end" }, h("button", { class: "ghost", onclick: closeModal }, "取消"), h("button", { class: "primary", onclick: save }, "保存到数据目录 conf.json")),
+      h("h3", {}, "版本与更新"),
+      h("div", { id: "update-section" }),
     ),
   );
+  renderUpdateSection();
+  // Check automatically when opening settings (unless checked in the last 10 minutes).
+  const stale = !state.update.checkedAt || Date.now() - state.update.checkedAt.getTime() > 10 * 60 * 1000;
+  if (stale) void checkForUpdate({ silent: true });
 }
 
 // ---------- boot ----------
@@ -500,6 +621,8 @@ async function boot() {
     // Persist recovered entries, and download covers that aren't stored locally yet (e.g. migrated library.json data).
     raw.filter((v) => v.status === "processing").forEach((v) => void persist(v.id));
     state.videos.filter((v) => !v.localThumbnail).forEach((v) => void cacheThumbnail(v.id));
+    // Quietly look for a new release in the background.
+    if (!state.update.checkedAt) void checkForUpdate({ silent: true });
   } catch (e) {
     app.replaceChildren(
       h("div", { class: "setup" }, h("h1", {}, "启动失败"), h("p", {}, errMsg(e)), h("button", { onclick: () => renderSetup(true) }, "重新选择数据目录")),
