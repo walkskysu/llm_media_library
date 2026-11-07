@@ -113,11 +113,23 @@ jobs:
           id=$(find_release)
           if [[ -z "$id" ]]; then
             echo "No release for $TAG yet; creating a draft"
-            flags=(--draft --generate-notes --verify-tag --title "LLM Media Library $TAG")
-            if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-            gh release create "$TAG" "${flags[@]}"
-            id=$(find_release)
-            [[ -n "$id" ]] || { echo "::error::Draft release for $TAG not found after creation"; exit 1; }
+            # The tag must already exist on GitHub (like `--verify-tag`).
+            gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq '.ref' >/dev/null \
+              || { echo "::error::Tag $TAG does not exist on GitHub"; exit 1; }
+            prerelease=false
+            if [[ "$VERSION" == *-* ]]; then prerelease=true; fi
+            # Create via the REST API and take the id from the response:
+            # the release list is eventually consistent and may not show a
+            # freshly created draft yet, so looking it up again can fail.
+            id=$(gh api -X POST "repos/$GH_REPO/releases" \
+              -f tag_name="$TAG" \
+              -f name="LLM Media Library $TAG" \
+              -F draft=true \
+              -F prerelease="$prerelease" \
+              -F generate_release_notes=true \
+              --jq '.id')
+            [[ -n "$id" ]] || { echo "::error::Failed to create draft release for $TAG"; exit 1; }
+            echo "Created draft release $TAG (id $id)"
           else
             echo "Release $TAG exists (id $id); uploading installers without changing its state"
           fi
