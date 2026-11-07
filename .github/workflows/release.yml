@@ -1,11 +1,16 @@
 name: Release
 
+# Draft + manual publish:
 # Push a tag like `v0.2.0` (after bumping the version with
 # `npm run version:set -- 0.2.0`) to build the Windows installers and
-# publish a GitHub Release with the installers attached. If a release for
-# the tag already exists (e.g. created by hand), the installers are
-# uploaded to it instead. Run manually (workflow_dispatch) with an existing
-# tag to (re)attach the installers to that release.
+# create a *draft* GitHub Release with the installers attached. The workflow
+# never publishes: a maintainer reviews the draft (notes, assets) and clicks
+# "Publish release" on GitHub. Until then the release is invisible to users
+# and to the in-app update check.
+# If a release for the tag already exists (draft or published, e.g. created
+# by hand), the installers are uploaded to it and its draft/published state
+# is left unchanged. Run manually (workflow_dispatch) with an existing tag to
+# (re)attach the installers to that release.
 on:
   push:
     tags: ["v*"]
@@ -76,7 +81,7 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
 
   release:
-    name: Publish GitHub Release
+    name: Create draft GitHub Release
     needs: build-windows
     runs-on: ubuntu-latest
     env:
@@ -94,27 +99,58 @@ jobs:
           cd upload
           sha256sum * > SHA256SUMS.txt
           ls -l
-      - name: Create or update release
+      - name: Create draft release or update existing one
         run: |
           VERSION="${TAG#v}"
           # Find any release for this tag, including drafts (which
-          # `gh release view <tag>` cannot see). Prefer a published one, so
-          # a release created by hand on the web UI gets the installers.
-          id=$(gh api "repos/$GH_REPO/releases?per_page=100" --paginate \
-            --jq ".[] | select(.tag_name == \"$TAG\") | \"\\(.draft) \\(.id)\"" \
-            | sort | head -n1 | cut -d' ' -f2)
-          if [[ -n "$id" ]]; then
-            echo "Release $TAG exists (id $id); uploading installers and publishing"
-            gh api -X PATCH "repos/$GH_REPO/releases/$id" -F draft=false -f tag_name="$TAG" >/dev/null
-            gh release upload "$TAG" upload/* --clobber
-          else
-            flags=(--generate-notes --verify-tag --title "LLM Media Library $TAG")
+          # `gh release view <tag>` cannot reliably see). Prefer a published
+          # one; otherwise reuse an existing draft.
+          find_release() {
+            gh api "repos/$GH_REPO/releases?per_page=100" --paginate \
+              --jq ".[] | select(.tag_name == \"$TAG\") | \"\\(.draft) \\(.id)\"" \
+              | sort | head -n1 | cut -d' ' -f2
+          }
+          id=$(find_release)
+          if [[ -z "$id" ]]; then
+            echo "No release for $TAG yet; creating a draft"
+            flags=(--draft --generate-notes --verify-tag --title "LLM Media Library $TAG")
             if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-            gh release create "$TAG" upload/* "${flags[@]}"
+            gh release create "$TAG" "${flags[@]}"
+            id=$(find_release)
+            [[ -n "$id" ]] || { echo "::error::Draft release for $TAG not found after creation"; exit 1; }
+          else
+            echo "Release $TAG exists (id $id); uploading installers without changing its state"
           fi
+          echo "RELEASE_ID=$id" >> "$GITHUB_ENV"
+          # Upload by release id so drafts work too; replace same-name assets.
+          for f in upload/*; do
+            name=$(basename "$f")
+            # GitHub stores spaces in asset names as dots.
+            stored="${name// /.}"
+            gh api "repos/$GH_REPO/releases/$id/assets?per_page=100" --paginate \
+              --jq ".[] | select(.name == \"$name\" or .name == \"$stored\") | .id" \
+              | while read -r asset; do
+                  echo "Deleting existing asset $name ($asset)"
+                  gh api -X DELETE "repos/$GH_REPO/releases/assets/$asset"
+                done
+            echo "Uploading $name"
+            gh api -X POST \
+              "https://uploads.github.com/repos/$GH_REPO/releases/$id/assets?name=$(jq -rn --arg n "$name" '$n|@uri')" \
+              -H "Content-Type: application/octet-stream" \
+              --input "$f" --jq '.name'
+          done
       - name: Check installers are attached
         run: |
-          assets=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          info=$(gh api "repos/$GH_REPO/releases/$RELEASE_ID")
+          assets=$(jq -r '.assets[].name' <<<"$info")
           echo "$assets"
           grep -q -- '-setup\.exe$' <<<"$assets" || { echo "::error::NSIS installer missing from release $TAG"; exit 1; }
           grep -q -- '\.msi$' <<<"$assets" || { echo "::error::MSI installer missing from release $TAG"; exit 1; }
+          grep -qx -- 'SHA256SUMS.txt' <<<"$assets" || { echo "::error::SHA256SUMS.txt missing from release $TAG"; exit 1; }
+          if [[ "$(jq -r '.draft' <<<"$info")" == "true" ]]; then
+            url=$(jq -r '.html_url' <<<"$info")
+            echo "::notice::Draft release $TAG is ready for review. Publish it manually: $url"
+            echo "Draft release **$TAG** is ready. Review it and click **Publish release**: $url" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice::Release $TAG is already published; installers were updated."
+          fi
