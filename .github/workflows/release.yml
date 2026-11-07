@@ -2,7 +2,10 @@ name: Release
 
 # Push a tag like `v0.2.0` (after bumping the version with
 # `npm run version:set -- 0.2.0`) to build the Windows installers and
-# create a *draft* GitHub Release. Review the draft, then click "Publish".
+# publish a GitHub Release with the installers attached. If a release for
+# the tag already exists (e.g. created by hand), the installers are
+# uploaded to it instead. Run manually (workflow_dispatch) with an existing
+# tag to (re)attach the installers to that release.
 on:
   push:
     tags: ["v*"]
@@ -73,7 +76,7 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
 
   release:
-    name: Create GitHub Release (draft)
+    name: Publish GitHub Release
     needs: build-windows
     runs-on: ubuntu-latest
     env:
@@ -94,11 +97,24 @@ jobs:
       - name: Create or update release
         run: |
           VERSION="${TAG#v}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists; replacing assets"
+          # Find any release for this tag, including drafts (which
+          # `gh release view <tag>` cannot see). Prefer a published one, so
+          # a release created by hand on the web UI gets the installers.
+          id=$(gh api "repos/$GH_REPO/releases?per_page=100" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | \"\\(.draft) \\(.id)\"" \
+            | sort | head -n1 | cut -d' ' -f2)
+          if [[ -n "$id" ]]; then
+            echo "Release $TAG exists (id $id); uploading installers and publishing"
+            gh api -X PATCH "repos/$GH_REPO/releases/$id" -F draft=false -f tag_name="$TAG" >/dev/null
             gh release upload "$TAG" upload/* --clobber
           else
-            flags=(--draft --generate-notes --verify-tag --title "LLM Media Library $TAG")
+            flags=(--generate-notes --verify-tag --title "LLM Media Library $TAG")
             if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
             gh release create "$TAG" upload/* "${flags[@]}"
           fi
+      - name: Check installers are attached
+        run: |
+          assets=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          echo "$assets"
+          grep -q -- '-setup\.exe$' <<<"$assets" || { echo "::error::NSIS installer missing from release $TAG"; exit 1; }
+          grep -q -- '\.msi$' <<<"$assets" || { echo "::error::MSI installer missing from release $TAG"; exit 1; }
