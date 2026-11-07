@@ -127,10 +127,12 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/LLM Media Library_0.
 
 ## 发布 GitHub Release
 
-发布流程由 GitHub Actions 自动完成（`.github/workflows/release.yml`）：推送 `v*` 标签后，
-在 `windows-latest` 上运行测试并构建 NSIS（`.exe`）与 MSI 安装包，然后**直接发布** Release，
-附带 Windows 安装包与 `SHA256SUMS.txt`，并自动生成更新说明（GitHub 自动附带的源代码包除外，
-安装包需由工作流上传）。
+发布采用 **“草稿 + 人工发布”** 流程（`.github/workflows/release.yml`）：推送 `v*` 标签后，
+GitHub Actions 在 `windows-latest` 上运行测试并构建 NSIS（`.exe`）与 MSI 安装包，然后创建一个
+**草稿（Draft）Release**，附带 Windows 安装包与 `SHA256SUMS.txt`，并自动生成更新说明（GitHub
+自动附带的源代码包除外，安装包需由工作流上传）。工作流**不会**自动发布；维护者检查草稿无误后，
+在网页上手动点击 **Publish release** 才会正式发布。草稿对普通用户不可见，应用内的更新检查也只会
+看到已发布的版本。
 
 1. 更新版本号（同时写入 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、
    `src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`）：
@@ -149,16 +151,19 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/LLM Media Library_0.
    git push origin v0.2.0
    ```
 
-4. 等待 Actions 中的 **Release** 工作流完成，Releases 页面上即会出现带安装包的正式版本。
-   **不要**在网页上手动新建 Release——若需要修改说明，请在工作流发布后编辑该 Release。
+4. 等待 Actions 中的 **Release** 工作流完成（运行摘要中会给出草稿链接），打开
+   [Releases 页面](https://github.com/walkskysu/llm_media_library/releases) 找到 `v0.2.0` 的草稿。
+5. 人工检查草稿：确认 `*-setup.exe`、`.msi` 与 `SHA256SUMS.txt` 均已附带，按需编辑标题与更新说明
+   （预发布版本可确认已勾选 Pre-release）。
+6. 点击 **Publish release** 正式发布。发布后应用内的「检查更新」才会提示该版本。
 
 说明：
 
 - 标签必须与应用版本号一致（`v0.2.0` ↔ `0.2.0`），否则工作流会在 `verify` 阶段失败。
 - 带预发布后缀的标签（如 `v0.2.0-beta.1`）会被标记为 Pre-release。
-- 若该标签已有 Release（例如在网页上手动创建、只有源代码包），工作流会把安装包上传到该 Release
-  （优先已发布的版本；若只有草稿则将其发布），并覆盖同名文件。工作流最后会检查 Release 中确实包含
-  `*-setup.exe` 与 `.msi`，否则失败。
+- 若该标签已有 Release（草稿或已发布，例如在网页上手动创建、只有源代码包），工作流会把安装包上传到
+  该 Release（优先已发布的版本，其次草稿），覆盖同名文件，且**不改变**其草稿/已发布状态。工作流最后
+  会检查 Release 中确实包含 `*-setup.exe`、`.msi` 与 `SHA256SUMS.txt`，否则失败。
 - 也可以在 Actions 页面手动运行 **Release**（`workflow_dispatch`），输入已存在的标签（如 `v0.1.0`）
   以重新构建并补传安装包。
 - 安装包未做代码签名，Windows SmartScreen 可能会提示“未知发布者”。
