@@ -9,6 +9,11 @@ export const backend = {
   deleteVideo: (id: string) => invoke<void>("delete_video", { id }),
   /** Download the cover into the data directory; resolves to the local file path. */
   cacheThumbnail: (id: string, urls: string[]) => invoke<string>("cache_thumbnail", { id, urls }),
+  /** Store a frontend-generated cover (PNG bytes); resolves to the local file path. */
+  storeCover: (id: string, bytes: Uint8Array) => invoke<string>("store_cover", { id, bytes: Array.from(bytes) }),
+  /** Public GitHub repo API JSON + raw README text (empty if the repo has none). */
+  fetchGithubRepo: (owner: string, repo: string) =>
+    invoke<{ repo: unknown; readme: string }>("fetch_github_repo", { owner, repo }),
   loadGeminiConfig: () => invoke<GeminiConfig>("load_gemini_config"),
   saveGeminiConfig: (apiKey: string, model: string) =>
     invoke<GeminiConfig>("save_gemini_config", { apiKey, model }),

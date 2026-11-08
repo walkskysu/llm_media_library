@@ -35,6 +35,16 @@ pub struct Video {
     /// the backend (see [`Library::cache_thumbnail`]) and ignored on upsert.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_thumbnail: Option<String>,
+    /// `youtube` (default) or `github`.
+    pub kind: String,
+    /// GitHub: Gemini summary of the README.
+    pub summary: String,
+    /// GitHub: one-line feature headline shown on the generated cover.
+    pub headline: String,
+    /// GitHub: star count when the repo was (re)fetched.
+    pub stars: Option<i64>,
+    /// GitHub: primary language.
+    pub language: String,
 }
 
 const SCHEMA: &str = "
@@ -57,7 +67,16 @@ CREATE TABLE IF NOT EXISTS videos (
 CREATE INDEX IF NOT EXISTS idx_videos_added_at ON videos(added_at DESC);
 ";
 
-const SCHEMA_VERSION: i64 = 1;
+/// v2: GitHub repositories are stored in the same table (`kind = 'github'`).
+const MIGRATION_V2: &str = "
+ALTER TABLE videos ADD COLUMN kind     TEXT NOT NULL DEFAULT 'youtube';
+ALTER TABLE videos ADD COLUMN summary  TEXT NOT NULL DEFAULT '';
+ALTER TABLE videos ADD COLUMN headline TEXT NOT NULL DEFAULT '';
+ALTER TABLE videos ADD COLUMN stars    INTEGER;
+ALTER TABLE videos ADD COLUMN language TEXT NOT NULL DEFAULT '';
+";
+
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Library {
     dir: PathBuf,
@@ -81,10 +100,16 @@ impl Library {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(sql_err)?;
-        if version < SCHEMA_VERSION {
+        if version < 1 {
             conn.execute_batch(SCHEMA).map_err(sql_err)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            conn.pragma_update(None, "user_version", 1)
                 .map_err(sql_err)?;
+        }
+        if version < SCHEMA_VERSION {
+            conn.execute_batch(&format!(
+                "BEGIN;{MIGRATION_V2}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+            ))
+            .map_err(sql_err)?;
         }
         let mut lib = Library {
             dir: dir.to_path_buf(),
@@ -122,7 +147,8 @@ impl Library {
             .conn
             .prepare(
                 "SELECT id, url, title, author, published_at, duration_seconds, description,
-                        thumbnail_url, transcript, status, error, added_at, updated_at, thumbnail_file
+                        thumbnail_url, transcript, status, error, added_at, updated_at, thumbnail_file,
+                        kind, summary, headline, stars, language
                  FROM videos ORDER BY added_at DESC",
             )
             .map_err(sql_err)?;
@@ -144,6 +170,11 @@ impl Library {
                         added_at: r.get(11)?,
                         updated_at: r.get(12)?,
                         local_thumbnail: None,
+                        kind: r.get(14)?,
+                        summary: r.get(15)?,
+                        headline: r.get(16)?,
+                        stars: r.get(17)?,
+                        language: r.get(18)?,
                     },
                     r.get::<_, Option<String>>(13)?,
                 ))
@@ -248,14 +279,17 @@ fn upsert(conn: &Connection, v: &Video) -> Result<(), String> {
     }
     conn.execute(
         "INSERT INTO videos (id, url, title, author, published_at, duration_seconds, description,
-                             thumbnail_url, transcript, status, error, added_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                             thumbnail_url, transcript, status, error, added_at, updated_at,
+                             kind, summary, headline, stars, language)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(id) DO UPDATE SET
             url = excluded.url, title = excluded.title, author = excluded.author,
             published_at = excluded.published_at, duration_seconds = excluded.duration_seconds,
             description = excluded.description, thumbnail_url = excluded.thumbnail_url,
             transcript = excluded.transcript, status = excluded.status, error = excluded.error,
-            added_at = excluded.added_at, updated_at = excluded.updated_at",
+            added_at = excluded.added_at, updated_at = excluded.updated_at,
+            kind = excluded.kind, summary = excluded.summary, headline = excluded.headline,
+            stars = excluded.stars, language = excluded.language",
         params![
             v.id,
             v.url,
@@ -266,24 +300,39 @@ fn upsert(conn: &Connection, v: &Video) -> Result<(), String> {
             v.description,
             v.thumbnail_url,
             v.transcript,
-            if v.status.is_empty() { "ready" } else { &v.status },
+            if v.status.is_empty() {
+                "ready"
+            } else {
+                &v.status
+            },
             v.error,
             v.added_at,
-            v.updated_at
+            v.updated_at,
+            if v.kind.is_empty() {
+                "youtube"
+            } else {
+                &v.kind
+            },
+            v.summary,
+            v.headline,
+            v.stars,
+            v.language
         ],
     )
     .map_err(sql_err)?;
     Ok(())
 }
 
-/// YouTube ids are 11 chars of `[A-Za-z0-9_-]`; we accept any such token so the
-/// id is always safe to use as a file name.
+/// YouTube ids are 11 chars of `[A-Za-z0-9_-]`; GitHub entries use
+/// `github.<owner>.<repo>` (repo names may contain `.`). Ids never contain a
+/// path separator or start with `.`, so they are always safe as file names.
 pub fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 64
+        && id.len() <= 220
+        && !id.starts_with('.')
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 /// Detect the image type from magic bytes.
@@ -336,6 +385,7 @@ mod tests {
             added_at: added.into(),
             updated_at: added.into(),
             duration_seconds: Some(61.0),
+            kind: "youtube".into(),
             ..Default::default()
         }
     }
@@ -408,6 +458,52 @@ mod tests {
         let path = lib.store_thumbnail("aaaaaaaaaaa", JPG).unwrap();
         lib.delete("aaaaaaaaaaa").unwrap();
         assert!(!Path::new(&path).exists());
+    }
+
+    #[test]
+    fn stores_github_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path()).unwrap();
+        let mut g = video("github.tauri-apps.tauri", "2024-03-01");
+        g.kind = "github".into();
+        g.summary = "summary".into();
+        g.headline = "Build apps".into();
+        g.stars = Some(42);
+        g.language = "Rust".into();
+        lib.upsert(&g).unwrap();
+        lib.upsert(&video("aaaaaaaaaaa", "2024-01-01")).unwrap();
+        let list = lib.list().unwrap();
+        assert_eq!(list[0], g);
+        assert_eq!(list[1].kind, "youtube");
+        let png = b"\x89PNG\r\n\x1a\nxxxx";
+        let path = lib.store_thumbnail("github.socket.io.socket.io", png);
+        assert!(path.is_err()); // row does not exist
+        let path = lib.store_thumbnail(&g.id, png).unwrap();
+        assert!(path.ends_with("github.tauri-apps.tauri.png"));
+        assert!(!is_valid_id(".."));
+        assert!(!is_valid_id("github/x"));
+    }
+
+    #[test]
+    fn migrates_v1_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join(DB_FILE)).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO videos (id, title, added_at) VALUES ('aaaaaaaaaaa', 't', '2024')",
+                [],
+            )
+            .unwrap();
+        }
+        let lib = Library::open(dir.path()).unwrap();
+        let list = lib.list().unwrap();
+        assert_eq!(list[0].kind, "youtube");
+        assert_eq!(list[0].stars, None);
+        // Re-opening must not re-run the migration.
+        drop(lib);
+        Library::open(dir.path()).unwrap();
     }
 
     #[test]
