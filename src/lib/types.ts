@@ -1,5 +1,8 @@
 export type VideoStatus = "processing" | "ready" | "error";
 
+/** What a library entry bookmarks. Entries saved before GitHub support have no kind (= youtube). */
+export type MediaKind = "youtube" | "github";
+
 export interface Video {
   id: string; // YouTube video id
   url: string;
@@ -16,6 +19,14 @@ export interface Video {
   updatedAt: string;
   /** Absolute path of the cover image cached in 数据目录/thumbnails (managed by the backend). */
   localThumbnail?: string;
+  kind?: MediaKind;
+  // --- GitHub repositories only ---
+  /** Gemini summary of the README (Markdown-ish plain text). */
+  summary?: string;
+  /** One-line feature headline, rendered on the generated cover. */
+  headline?: string;
+  stars?: number | null;
+  language?: string;
 }
 
 export interface VideoMetadata {

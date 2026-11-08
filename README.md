@@ -10,7 +10,12 @@
   封面、标题、作者、发布时间、视频时长、视频介绍
   - 封面从 `i.ytimg.com` 下载并保存到数据目录的 `thumbnails/` 中，界面始终从本地加载；标题/作者另外用 YouTube oEmbed 校正（尽力而为）
 - 使用 Issue 中给定的提示词，让 Gemini 直接“观看”视频并生成时间戳逐字稿
-- 首页以卡片式网格（Card-based Grid Layout）展示所有收藏，支持搜索
+- 输入 GitHub 仓库地址（`https://github.com/owner/repo`、`github.com/owner/repo`、`git@github.com:owner/repo.git`
+  或仓库内任意页面链接）即可收藏 GitHub 仓库：
+  - 通过 GitHub API 读取仓库信息（简介、语言、Star 数等）和 README，交给 Gemini 生成中文摘要与一句话功能标题
+  - 自动生成封面图片（仓库名 + 功能标题），保存到数据目录的 `thumbnails/` 中
+  - 详情中可查看摘要、重新生成摘要 / 封面、在 GitHub 打开
+- 首页以卡片式网格（Card-based Grid Layout）展示所有收藏，可在「全部 / YouTube / GitHub」之间切换，支持搜索
 - 点击封面打开详情：内嵌播放器播放、查看完整信息与逐字稿；**点击逐字稿中的时间戳可跳转播放**
 - 可以重新生成逐字稿 / 刷新信息 / 复制逐字稿 / 删除
 - 「⚙ 设置 → 版本与更新」显示当前版本，并自动检查 [GitHub Releases](https://github.com/walkskysu/llm_media_library/releases)
@@ -27,8 +32,8 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `library.db` | SQLite 数据库，保存收藏的视频列表（含元数据与逐字稿） |
-| `thumbnails/` | 视频封面图（本地保存，界面只从本地加载封面） |
+| `library.db` | SQLite 数据库，保存收藏列表（YouTube 视频的元数据与逐字稿、GitHub 仓库的信息与摘要） |
+| `thumbnails/` | 封面图（YouTube 封面下载保存、GitHub 封面本地生成，界面只从本地加载封面） |
 | `conf.json` | Gemini 配置（可在设置界面中填写后自动写入） |
 
 > 从旧版本升级：若数据目录中存在旧的 `library.json`，首次打开时会自动导入到 `library.db`，

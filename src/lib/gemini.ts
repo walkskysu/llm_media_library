@@ -51,6 +51,17 @@ export class GeminiClient {
     return normalizeMetadata(videoId, json);
   }
 
+  /** Text-only prompt (no video), e.g. summarising a GitHub README. */
+  async generateText(prompt: string): Promise<string> {
+    const res = await this.ai.models.generateContent({
+      model: this.model,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+    const text = res.text?.trim();
+    if (!text) throw new Error("Gemini 未返回内容");
+    return text;
+  }
+
   /** Structured timestamped transcript using the prompt from the spec. */
   async fetchTranscript(videoId: string): Promise<string> {
     const res = await this.ai.models.generateContent(

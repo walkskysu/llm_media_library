@@ -5,7 +5,28 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { backend } from "./lib/backend";
 import { DEFAULT_MODEL, fetchOEmbed, GeminiClient } from "./lib/gemini";
-import { createQueue, filterVideos, newVideo, recoverInterrupted, sortVideos, thumbnailCandidates } from "./lib/library";
+import {
+  countByKind,
+  createQueue,
+  filterByKind,
+  filterVideos,
+  kindOf,
+  type KindFilter,
+  newGithubRepo,
+  newVideo,
+  recoverInterrupted,
+  sortVideos,
+  thumbnailCandidates,
+} from "./lib/library";
+import { renderGithubCover } from "./lib/cover";
+import {
+  buildRepoSummaryPrompt,
+  formatStars,
+  githubId,
+  normalizeRepoInfo,
+  normalizeRepoSummary,
+  parseGithubUrl,
+} from "./lib/github";
 import { formatDuration } from "./lib/format";
 import { parseTranscript } from "./lib/transcript";
 import type { GeminiConfig, Video } from "./lib/types";
@@ -17,6 +38,7 @@ const state = {
   gemini: { apiKey: null, model: null, source: null } as GeminiConfig,
   videos: [] as Video[],
   query: "",
+  kind: "all" as KindFilter,
   openId: null as string | null,
   appVersion: "",
   update: {
@@ -89,8 +111,12 @@ async function cacheThumbnail(id: string) {
   if (!v || caching.has(id)) return;
   caching.add(id);
   try {
+    // GitHub covers are drawn locally (repo name + headline); YouTube covers are downloaded.
+    const png = kindOf(v) === "github" ? await githubCoverPng(v) : null;
     // Queue behind pending writes: the backend requires the row to exist.
-    const path = await dbQueue(() => backend.cacheThumbnail(id, thumbnailCandidates(v)));
+    const path = await dbQueue(() =>
+      png ? backend.storeCover(id, png) : backend.cacheThumbnail(id, thumbnailCandidates(v)),
+    );
     if (state.videos.some((x) => x.id === id)) {
       coverStamp.set(id, Date.now());
       state.videos = state.videos.map((x) => (x.id === id ? { ...x, localThumbnail: path } : x));
@@ -101,6 +127,17 @@ async function cacheThumbnail(id: string) {
   } finally {
     caching.delete(id);
   }
+}
+
+function githubCoverPng(v: Video): Promise<Uint8Array> {
+  const [owner, ...rest] = v.title.split("/");
+  return renderGithubCover({
+    owner: owner || v.author,
+    name: rest.join("/") || v.title,
+    headline: v.headline || v.description,
+    language: v.language,
+    stars: v.stars,
+  });
 }
 
 /** Cover src: always the locally cached file (cache-busted so a re-download shows up). */
@@ -173,7 +210,7 @@ function card(v: Video) {
   const src = coverSrc(v);
   const img = src
     ? h("img", { src, alt: v.title, loading: "lazy" })
-    : h("div", { class: "cover-placeholder" }, "封面下载中…");
+    : h("div", { class: "cover-placeholder" }, kindOf(v) === "github" ? "封面生成中…" : "封面下载中…");
   // Cached file vanished from disk: download it again.
   if (src)
     img.addEventListener("error", () => {
@@ -189,18 +226,27 @@ function card(v: Video) {
       { class: "cover", title: "查看详情", onclick: () => openDetail(v.id) },
       img,
       v.durationSeconds ? h("span", { class: "duration" }, formatDuration(v.durationSeconds)) : null,
+      h("span", { class: `kind-chip ${kindOf(v)}` }, kindOf(v) === "github" ? "GitHub" : "YouTube"),
       statusBadge(v),
     ),
     h(
       "div",
       { class: "card-body" },
       h("h3", { class: "title", title: v.title }, v.title || v.url),
-      h(
-        "div",
-        { class: "meta" },
-        h("span", {}, v.author || "—"),
-        v.publishedAt ? h("span", {}, v.publishedAt) : null,
-      ),
+      kindOf(v) === "github"
+        ? h(
+            "div",
+            { class: "meta" },
+            v.headline ? h("span", { class: "headline", title: v.headline }, v.headline) : null,
+            v.language ? h("span", {}, v.language) : null,
+            v.stars != null ? h("span", {}, `★ ${formatStars(v.stars)}`) : null,
+          )
+        : h(
+            "div",
+            { class: "meta" },
+            h("span", {}, v.author || "—"),
+            v.publishedAt ? h("span", {}, v.publishedAt) : null,
+          ),
     ),
   );
 }
@@ -208,27 +254,64 @@ function card(v: Video) {
 function renderGrid() {
   const grid = document.querySelector<HTMLDivElement>("#grid");
   if (!grid) return;
-  const list = filterVideos(sortVideos(state.videos), state.query);
-  if (state.videos.length === 0) {
-    grid.replaceChildren(h("div", { class: "empty" }, "还没有收藏的视频。在上方输入 YouTube 链接开始收藏吧！"));
+  const inTab = filterByKind(state.videos, state.kind);
+  const list = filterVideos(sortVideos(inTab), state.query);
+  if (inTab.length === 0) {
+    const hint =
+      state.kind === "github"
+        ? "还没有收藏的 GitHub 仓库。在上方粘贴 GitHub 仓库地址开始收藏吧！"
+        : state.kind === "youtube"
+          ? "还没有收藏的视频。在上方输入 YouTube 链接开始收藏吧！"
+          : "还没有收藏任何内容。在上方粘贴 YouTube 视频链接或 GitHub 仓库地址开始收藏吧！";
+    grid.replaceChildren(h("div", { class: "empty" }, hint));
   } else if (list.length === 0) {
-    grid.replaceChildren(h("div", { class: "empty" }, "没有匹配的视频"));
+    grid.replaceChildren(h("div", { class: "empty" }, "没有匹配的内容"));
   } else {
     grid.replaceChildren(...list.map(card));
   }
-  const count = document.querySelector("#count");
-  if (count) count.textContent = `${state.videos.length} 个视频`;
+  renderTabs();
+}
+
+const TABS: { kind: KindFilter; label: string }[] = [
+  { kind: "all", label: "全部" },
+  { kind: "youtube", label: "YouTube" },
+  { kind: "github", label: "GitHub" },
+];
+
+/** 全部 / YouTube / GitHub switcher with per-kind counts. */
+function renderTabs() {
+  const box = document.querySelector<HTMLDivElement>("#tabs");
+  if (!box) return;
+  const counts = countByKind(state.videos);
+  box.replaceChildren(
+    ...TABS.map((t) =>
+      h(
+        "button",
+        {
+          class: `tab${state.kind === t.kind ? " active" : ""}`,
+          role: "tab",
+          "aria-selected": String(state.kind === t.kind),
+          onclick: () => {
+            state.kind = t.kind;
+            renderGrid();
+          },
+        },
+        t.label,
+        h("span", { class: "tab-count" }, String(counts[t.kind])),
+      ),
+    ),
+  );
 }
 
 function renderMain() {
   const urlInput = h("input", {
     type: "text",
     id: "url-input",
-    placeholder: "粘贴 YouTube 视频链接，例如 https://www.youtube.com/watch?v=…",
+    placeholder: "粘贴 YouTube 视频链接或 GitHub 仓库地址，例如 https://github.com/owner/repo",
   });
   const submit = async (e: Event) => {
     e.preventDefault();
-    if (await addVideo(urlInput.value)) urlInput.value = "";
+    if (await addItem(urlInput.value)) urlInput.value = "";
   };
   const search = h("input", {
     type: "search",
@@ -256,7 +339,7 @@ function renderMain() {
           "未找到 GEMINI_API_KEY。请在 数据目录/conf.json 中配置，或点击右上角 设置 填写。",
         )
       : "",
-    h("div", { class: "toolbar" }, h("span", { id: "count" }), search),
+    h("div", { class: "toolbar" }, h("div", { id: "tabs", class: "tabs", role: "tablist" }), search),
     h("main", { id: "grid", class: "grid" }),
   );
   renderGrid();
@@ -280,10 +363,16 @@ function gemini(): GeminiClient {
   return new GeminiClient(state.gemini.apiKey, state.gemini.model);
 }
 
+/** Bookmark a YouTube video or a GitHub repository, depending on the URL. */
+async function addItem(input: string): Promise<boolean> {
+  if (!extractVideoId(input) && parseGithubUrl(input)) return addGithubRepo(input);
+  return addVideo(input);
+}
+
 async function addVideo(input: string): Promise<boolean> {
   const id = extractVideoId(input);
   if (!id) {
-    toast("无法识别的 YouTube 链接", "error");
+    toast("无法识别的链接：请输入 YouTube 视频链接或 GitHub 仓库地址", "error");
     return false;
   }
   if (state.videos.some((v) => v.id === id)) {
@@ -302,6 +391,63 @@ async function addVideo(input: string): Promise<boolean> {
   void cacheThumbnail(id);
   void processVideo(id);
   return true;
+}
+
+async function addGithubRepo(input: string): Promise<boolean> {
+  const ref = parseGithubUrl(input);
+  if (!ref) return false;
+  const id = githubId(ref);
+  if (state.videos.some((v) => v.id === id)) {
+    toast("该仓库已在收藏中");
+    openDetail(id);
+    return true;
+  }
+  if (!state.gemini.apiKey) {
+    toast("请先配置 GEMINI_API_KEY", "error");
+    openSettings();
+    return false;
+  }
+  state.videos = [newGithubRepo(ref), ...state.videos];
+  await persist(id);
+  renderGrid();
+  void processGithub(id);
+  return true;
+}
+
+/** Fetch repo info + README, summarise it with Gemini and draw the cover. */
+async function processGithub(id: string) {
+  const v = state.videos.find((x) => x.id === id);
+  if (!v) return;
+  const ref = parseGithubUrl(v.url);
+  if (!ref) return;
+  updateVideo(id, { status: "processing", error: undefined });
+  refresh(id);
+  try {
+    const { repo, readme } = await backend.fetchGithubRepo(ref.owner, ref.repo);
+    const info = normalizeRepoInfo(repo, ref);
+    updateVideo(id, {
+      title: info.fullName,
+      author: info.owner,
+      url: info.htmlUrl,
+      description: info.description,
+      language: info.language,
+      stars: info.stars,
+      publishedAt: info.pushedAt,
+    });
+    refresh(id);
+    await persist(id);
+    const text = await gemini().generateText(buildRepoSummaryPrompt(info, readme));
+    const { headline, summary } = normalizeRepoSummary(text, info);
+    updateVideo(id, { headline, summary, status: "ready" });
+  } catch (e) {
+    console.error(e);
+    updateVideo(id, { status: "error", error: errMsg(e) });
+    toast(`处理失败: ${errMsg(e)}`, "error");
+  }
+  await persist(id);
+  refresh(id);
+  // (Re)draw the cover with whatever we know now (headline falls back to the repo description).
+  void cacheThumbnail(id);
 }
 
 async function processVideo(id: string, opts: { metadata?: boolean; transcript?: boolean } = {}) {
@@ -405,6 +551,7 @@ function renderTranscript(text: string, onSeek: (s: number) => void) {
 function renderDetail(fresh = false) {
   const v = state.videos.find((x) => x.id === state.openId);
   if (!v) return closeModal();
+  if (kindOf(v) === "github") return renderGithubDetail(v);
 
   let modalEl = document.querySelector<HTMLDivElement>(".modal.video-detail");
   if (fresh || !modalEl || modalEl.dataset.id !== v.id) {
@@ -470,6 +617,65 @@ function renderDetail(fresh = false) {
       h("details", { class: "description", open: !v.transcript }, h("summary", {}, "视频介绍"), h("pre", {}, v.description || "—")),
       h("h3", {}, "时间戳逐字稿"),
       transcriptSection,
+  );
+}
+
+function renderGithubDetail(v: Video) {
+  let modalEl = document.querySelector<HTMLDivElement>(".modal.github-detail");
+  if (!modalEl || modalEl.dataset.id !== v.id) {
+    modalEl = h(
+      "div",
+      { class: "modal github-detail", "data-id": v.id },
+      h("button", { class: "close", onclick: closeModal, title: "关闭" }, "✕"),
+      h("div", { class: "repo-cover" }),
+      h("div", { class: "detail" }),
+    );
+    modal(modalEl);
+  }
+  const src = coverSrc(v);
+  modalEl
+    .querySelector(".repo-cover")!
+    .replaceChildren(
+      src ? h("img", { src, alt: v.title }) : h("div", { class: "cover-placeholder" }, "封面生成中…"),
+    );
+  const busy = v.status === "processing";
+  const remove = async () => {
+    if (!window.confirm(`确定删除「${v.title || v.id}」吗？`)) return;
+    closeModal();
+    await removeVideo(v.id);
+    renderGrid();
+  };
+  const copy = async () => {
+    await navigator.clipboard.writeText(v.summary ?? "");
+    toast("已复制摘要");
+  };
+  modalEl.querySelector(".detail")!.replaceChildren(
+    h("h2", {}, v.title || v.url),
+    v.headline ? h("p", { class: "repo-headline" }, v.headline) : "",
+    h(
+      "div",
+      { class: "meta" },
+      h("span", {}, `👤 ${v.author || "—"}`),
+      v.language ? h("span", {}, `💻 ${v.language}`) : null,
+      v.stars != null ? h("span", {}, `★ ${formatStars(v.stars)}`) : null,
+      v.publishedAt ? h("span", { title: "最近推送" }, `📅 ${v.publishedAt}`) : null,
+      statusBadge(v),
+    ),
+    v.status === "error" && v.error ? h("div", { class: "warning" }, v.error) : "",
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { onclick: () => openUrl(v.url) }, "在 GitHub 打开"),
+      h("button", { onclick: () => processGithub(v.id), disabled: busy }, "重新生成摘要"),
+      h("button", { onclick: () => cacheThumbnail(v.id), disabled: busy }, "重新生成封面"),
+      v.summary ? h("button", { onclick: copy }, "复制摘要") : null,
+      h("button", { class: "danger", onclick: remove }, "删除"),
+    ),
+    v.description ? h("details", { class: "description", open: true }, h("summary", {}, "仓库简介"), h("pre", {}, v.description)) : "",
+    h("h3", {}, "README 摘要"),
+    v.summary
+      ? h("div", { class: "repo-summary" }, v.summary)
+      : h("p", { class: "muted" }, busy ? "正在读取 README 并使用 Gemini 生成摘要…" : "暂无摘要"),
   );
 }
 

@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { createQueue, filterVideos, newVideo, recoverInterrupted, sortVideos, thumbnailCandidates } from "../src/lib/library";
+import {
+  countByKind,
+  createQueue,
+  filterByKind,
+  filterVideos,
+  kindOf,
+  newGithubRepo,
+  newVideo,
+  recoverInterrupted,
+  sortVideos,
+  thumbnailCandidates,
+} from "../src/lib/library";
 
 describe("library", () => {
   const a = { ...newVideo("aaaaaaaaaaa", new Date("2024-01-01")), title: "Rust tips", status: "ready" as const };
@@ -21,6 +32,34 @@ describe("library", () => {
     expect(ra.status).toBe("ready");
     expect(rb.status).toBe("error");
   });
+});
+
+describe("kinds", () => {
+  const yt = newVideo("aaaaaaaaaaa", new Date("2024-01-01"));
+  const legacy = { ...newVideo("ccccccccccc"), kind: undefined };
+  const gh = { ...newGithubRepo({ owner: "tauri-apps", repo: "tauri" }), summary: "跨平台 desktop framework" };
+
+  it("creates github entries", () => {
+    expect(gh).toMatchObject({
+      id: "github.tauri-apps.tauri",
+      url: "https://github.com/tauri-apps/tauri",
+      title: "tauri-apps/tauri",
+      kind: "github",
+      status: "processing",
+    });
+  });
+  it("treats entries without a kind as YouTube", () => {
+    expect(kindOf(legacy)).toBe("youtube");
+    expect(kindOf(yt)).toBe("youtube");
+  });
+  it("filters and counts by kind", () => {
+    const all = [yt, legacy, gh];
+    expect(filterByKind(all, "all")).toHaveLength(3);
+    expect(filterByKind(all, "youtube")).toEqual([yt, legacy]);
+    expect(filterByKind(all, "github")).toEqual([gh]);
+    expect(countByKind(all)).toEqual({ all: 3, youtube: 2, github: 1 });
+  });
+  it("searches the repo summary", () => expect(filterVideos([yt, gh], "desktop")).toEqual([gh]));
 });
 
 describe("thumbnailCandidates", () => {
