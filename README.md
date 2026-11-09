@@ -16,9 +16,12 @@
   - 自动生成封面图片（仓库名 + 功能标题），保存到数据目录的 `thumbnails/` 中
   - 详情中可查看摘要、重新生成摘要 / 封面、在 GitHub 打开
 - 输入一般网址（如 `https://example.com/article`、`example.com/post`）即可收藏网页（`github.com` 开头的地址仍按上面的 GitHub 规则处理）：
-  - 收藏时会询问是否「同时将网页内容保存为 PDF 文件」；PDF 由本机的 Microsoft Edge / Google Chrome / Chromium
-    以无头模式打印生成（Windows 10/11 自带 Edge，无需额外安装；也可用环境变量 `LLM_MEDIA_LIBRARY_BROWSER` 指定浏览器路径），
-    保存到数据目录的 `pdfs/` 中。若网址本身就是 PDF 文件，则直接下载保存
+  - 收藏时会询问是否「同时将网页内容保存为 PDF 文件」。PDF 由**本机浏览器**生成：可选 Google Chrome / Microsoft Edge /
+    Mozilla Firefox（也可用环境变量 `LLM_MEDIA_LIBRARY_BROWSER` 指定浏览器路径）。应用会打开一个浏览器窗口显示该网页，
+    需要登录的文章可直接在窗口中登录；文章完整显示后点击「抓取并保存 PDF」，应用会自动滚动页面加载图片，
+    再把文字和图片按浏览器中显示的样子打印成 PDF，保存到数据目录的 `pdfs/` 中，然后关闭该窗口。
+    这个窗口使用本应用专用的浏览器配置（位于应用本地数据目录的 `browser-profiles/`），登录状态会保留，下次无需重复登录。
+    若网址本身就是 PDF 文件，则直接下载保存
   - 读取网页标题、简介、网站名称与正文（自动识别 GBK / Big5 等编码），交给 Gemini 生成中文的网页介绍
   - 自动生成以网页标题为内容的封面图片；详情中可查看网页介绍、内嵌浏览已保存的 PDF，
     以及「保存为 PDF / 重新生成 PDF」「打开 PDF」（系统默认阅读器）「在浏览器打开」等操作

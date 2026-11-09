@@ -489,7 +489,7 @@ function askWebOptions(url: string): Promise<{ pdf: boolean } | null> {
           "label",
           { class: "check" },
           pdf,
-          h("span", {}, "同时将网页内容保存为 PDF 文件", h("small", { class: "muted" }, "（使用本机 Microsoft Edge / Chrome 生成，保存在 数据目录/pdfs）")),
+          h("span", {}, "同时将网页内容保存为 PDF 文件", h("small", { class: "muted" }, "（在本机 Chrome / Edge / Firefox 中打开网页，可先登录再抓取文字和图片，保存在 数据目录/pdfs）")),
         ),
         h("div", { class: "row end" }, h("button", { class: "ghost", onclick: () => finish(null) }, "取消"), ok),
       ),
@@ -580,8 +580,10 @@ async function savePdf(id: string) {
   try {
     // Queue behind pending writes: the backend requires the row to exist.
     await dbQueue(async () => undefined);
-    const path = await backend.saveWebPdf(id, v.url);
-    if (state.videos.some((x) => x.id === id)) {
+    // Links that serve a PDF file are simply downloaded; web pages are captured
+    // in the user's own browser (articles often need a login).
+    const path = (await backend.downloadWebPdf(id, v.url)) ?? (await capturePdfInBrowser(id));
+    if (path && state.videos.some((x) => x.id === id)) {
       state.videos = state.videos.map((x) => (x.id === id ? { ...x, localPdf: path } : x));
       pdfStamp.set(id, Date.now());
       toast(`已保存 PDF：${v.title || v.url}`);
@@ -594,6 +596,124 @@ async function savePdf(id: string) {
     pdfBusy.delete(id);
     refresh(id);
   }
+}
+
+const BROWSER_PREF_KEY = "pdfBrowser";
+
+/**
+ * Open the page in a local browser (Chrome / Edge / Firefox), let the user log in
+ * and wait for the article, then capture it as PDF. Resolves to the saved file
+ * path, or null when cancelled. Re-opens the detail view it was started from.
+ */
+function capturePdfInBrowser(id: string): Promise<string | null> {
+  const v = state.videos.find((x) => x.id === id)!;
+  const reopen = state.openId === id;
+  return new Promise((resolve) => {
+    let done = false;
+    let opened = false;
+    let working = false;
+    const finish = (path: string | null) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      if (!path) void backend.closePdfBrowser().catch(() => undefined);
+      closeModal();
+      if (reopen && state.videos.some((x) => x.id === id)) openDetail(id);
+      resolve(path);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !working) finish(null);
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    const select = h("select", { disabled: true }, h("option", { value: "" }, "正在查找浏览器…"));
+    const status = h("p", { class: "muted capture-status" }, "");
+    const openBtn = h("button", { disabled: true }, "打开浏览器");
+    const captureBtn = h("button", { class: "primary", disabled: true }, "抓取并保存 PDF");
+    const setStatus = (text: string, error = false) => {
+      status.textContent = text;
+      status.classList.toggle("update-error", error);
+    };
+    const sync = () => {
+      openBtn.disabled = working || select.options.length === 0 || !select.value;
+      openBtn.textContent = opened ? "重新打开" : "打开浏览器";
+      captureBtn.disabled = working || !opened;
+      select.disabled = working || select.options.length === 0 || !select.value;
+    };
+
+    const open = async () => {
+      working = true;
+      sync();
+      setStatus("正在启动浏览器…");
+      try {
+        localStorage.setItem(BROWSER_PREF_KEY, select.value);
+        const name = await backend.openPdfBrowser(v.url, select.value || null);
+        opened = true;
+        setStatus(`已在 ${name} 中打开网页。如需登录请在该窗口中登录，等文章完整显示后点击「抓取并保存 PDF」。`);
+      } catch (e) {
+        setStatus(`无法打开浏览器：${errMsg(e)}`, true);
+      } finally {
+        working = false;
+        sync();
+      }
+    };
+    const capture = async () => {
+      working = true;
+      sync();
+      setStatus("正在滚动页面加载图片并生成 PDF，请勿关闭浏览器…");
+      try {
+        finish(await backend.captureBrowserPdf(id));
+      } catch (e) {
+        setStatus(`抓取失败：${errMsg(e)}。可在浏览器中调整后重试。`, true);
+        working = false;
+        sync();
+      }
+    };
+    openBtn.onclick = () => void open();
+    captureBtn.onclick = () => void capture();
+
+    modal(
+      h(
+        "div",
+        { class: "modal settings pdf-capture" },
+        h("button", { class: "close", onclick: () => !working && finish(null) }, "✕"),
+        h("h2", {}, "保存网页为 PDF"),
+        h("p", { class: "url-line" }, v.url),
+        h(
+          "p",
+          { class: "muted" },
+          "将在本机浏览器中打开该网页。若文章需要登录，请直接在打开的窗口中登录（该窗口使用本应用专用的浏览器配置，登录状态会保留，下次无需重复登录）。文章完整显示后回到这里点击「抓取并保存 PDF」，文字和图片会按浏览器中显示的样子保存。",
+        ),
+        h("label", {}, "浏览器", h("div", { class: "row" }, select, openBtn)),
+        status,
+        h(
+          "div",
+          { class: "row end" },
+          h("button", { class: "ghost", onclick: () => !working && finish(null) }, "取消"),
+          captureBtn,
+        ),
+      ),
+      () => !working && finish(null),
+    );
+
+    void backend
+      .listBrowsers()
+      .then((list) => {
+        if (done) return;
+        select.replaceChildren(...list.map((b) => h("option", { value: b.id }, b.name)));
+        if (!list.length) {
+          select.append(h("option", { value: "" }, "未找到浏览器"));
+          setStatus("未找到 Google Chrome / Microsoft Edge / Mozilla Firefox，请先安装其中之一。", true);
+          sync();
+          return;
+        }
+        const pref = localStorage.getItem(BROWSER_PREF_KEY);
+        if (pref && list.some((b) => b.id === pref)) select.value = pref;
+        sync();
+        void open();
+      })
+      .catch((e) => setStatus(errMsg(e), true));
+  });
 }
 
 const pdfStamp = new Map<string, number>();
@@ -943,7 +1063,7 @@ function renderWebDetail(v: Video) {
     h("h3", {}, "PDF 文件"),
     pdf
       ? h("iframe", { class: "pdf-frame", src: pdf, title: `${v.title} (PDF)` })
-      : h("p", { class: "muted" }, pdfWorking ? "正在使用浏览器将网页保存为 PDF…" : "尚未保存 PDF。点击上方「保存为 PDF」即可将网页内容保存为 PDF 文件。"),
+      : h("p", { class: "muted" }, pdfWorking ? "正在通过本机浏览器将网页保存为 PDF…" : "尚未保存 PDF。点击上方「保存为 PDF」即可将网页内容保存为 PDF 文件。"),
   );
 }
 
