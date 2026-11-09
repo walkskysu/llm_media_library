@@ -68,8 +68,7 @@ jobs:
           workspaces: "src-tauri -> target"
       - run: npm ci
       - name: Rust tests
-        working-directory: src-tauri
-        run: cargo test --locked
+        run: npm run test:rust
       - name: Build NSIS + MSI installers
         run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi
       - uses: actions/upload-artifact@v4
