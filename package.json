@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc",
     "test": "vitest run",
+    "test:rust": "cd src-tauri && cargo test --locked",
     "tauri": "tauri",
     "build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles nsis",
     "build:windows:msi": "tauri build --target x86_64-pc-windows-msvc --bundles msi",

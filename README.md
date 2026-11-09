@@ -80,7 +80,7 @@ npm install
 npm run tauri dev      # 开发模式运行
 npm test               # 前端单元测试（vitest）
 npm run typecheck      # TypeScript 类型检查
-cd src-tauri && cargo test   # Rust 单元测试
+npm run test:rust      # Rust 单元测试（cargo test --locked）
 ```
 
 ## 在 Windows 上构建 Windows 安装包
