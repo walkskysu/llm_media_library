@@ -1,6 +1,6 @@
 [package]
 name = "llm-media-library"
-version = "0.1.5"
+version = "0.1.6"
 description = "Bookmark YouTube videos and auto-generate structured transcripts with Gemini"
 authors = ["walksky"]
 edition = "2024"
