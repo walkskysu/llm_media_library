@@ -6,11 +6,15 @@
 //!   with cover images cached locally under `thumbnails/` (see [`db`])
 //! - load `GEMINI_API_KEY` / `GEMINI_API_MODEL` from a `conf.json` file
 //!   (a legacy `.env` in the data directory is migrated automatically)
+//! - fetch web pages (see [`web`]) and save them as PDF with the user's own
+//!   Chrome / Edge / Firefox, so pages that need a login work (see [`browser`])
 //! - check GitHub Releases for a newer version and install it (see [`updater`])
 
+pub mod browser;
 pub mod db;
 pub mod github;
 pub mod updater;
+pub mod web;
 
 use db::{Library, Video};
 use serde::{Deserialize, Serialize};
@@ -18,7 +22,9 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
 
 const SETTINGS_FILE: &str = "settings.json";
 const CONF_FILE: &str = "conf.json";
@@ -230,12 +236,14 @@ fn set_data_dir(app: AppHandle, path: String) -> Result<Settings, String> {
     Ok(settings)
 }
 
-/// Let the webview load cached cover images through the asset protocol.
+/// Let the webview load cached cover images and saved PDFs through the asset protocol.
 fn allow_thumbnail_dir(app: &AppHandle, dir: &Path) {
-    let thumbs = dir.join(db::THUMB_DIR);
-    let _ = fs::create_dir_all(&thumbs);
-    if let Err(e) = app.asset_protocol_scope().allow_directory(&thumbs, true) {
-        eprintln!("failed to allow thumbnail dir in asset scope: {e}");
+    for sub in [db::THUMB_DIR, db::PDF_DIR] {
+        let path = dir.join(sub);
+        let _ = fs::create_dir_all(&path);
+        if let Err(e) = app.asset_protocol_scope().allow_directory(&path, true) {
+            eprintln!("failed to allow {sub} dir in asset scope: {e}");
+        }
     }
 }
 
@@ -279,6 +287,146 @@ async fn fetch_github_repo(owner: String, repo: String) -> Result<Value, String>
     tauri::async_runtime::spawn_blocking(move || github::fetch_repo(&owner, &repo))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Web page HTML (base64, undecoded) + final URL + content type.
+#[tauri::command]
+async fn fetch_web_page(url: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || web::fetch_page(&url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// If the URL serves a PDF file itself, download it to `数据目录/pdfs/<id>.pdf`
+/// and return the path. `None` = it's a regular web page; use the browser flow.
+#[tauri::command]
+async fn download_web_pdf(
+    app: AppHandle,
+    id: String,
+    url: String,
+) -> Result<Option<String>, String> {
+    if !db::is_valid_id(&id) {
+        return Err(format!("非法的 ID: {id}"));
+    }
+    let bytes = tauri::async_runtime::spawn_blocking(move || web::download_pdf(&url))
+        .await
+        .map_err(|e| e.to_string())??;
+    match bytes {
+        Some(bytes) => with_library(app, move |lib| lib.store_pdf(&id, &bytes))
+            .await
+            .map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The browser window currently opened for saving a page as PDF.
+#[derive(Default)]
+struct PdfBrowser(Mutex<Option<browser::Session>>);
+
+fn take_pdf_browser(app: &AppHandle) -> Option<browser::Session> {
+    app.state::<PdfBrowser>()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
+/// Installed browsers that can be used to save pages as PDF.
+#[tauri::command]
+async fn list_browsers() -> Result<Vec<browser::BrowserInfo>, String> {
+    tauri::async_runtime::spawn_blocking(browser::installed)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Open `url` in a visible window of the chosen local browser (Chrome / Edge /
+/// Firefox; `None` = first installed) so the user can log in before the page is
+/// captured. Returns the browser's display name.
+#[tauri::command]
+async fn open_pdf_browser(
+    app: AppHandle,
+    url: String,
+    browser: Option<String>,
+) -> Result<String, String> {
+    if !web::is_http_url(&url) {
+        return Err(format!("不支持的网址: {url}"));
+    }
+    let profiles = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("browser-profiles");
+    let previous = take_pdf_browser(&app);
+    let session = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(s) = previous {
+            s.close();
+        }
+        let info = browser::pick(browser.as_deref())?;
+        browser::Session::launch(info, &url, &profiles)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let name = session.browser.name.to_string();
+    *app.state::<PdfBrowser>()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(session);
+    Ok(name)
+}
+
+/// Capture the page shown in the opened browser as `数据目录/pdfs/<id>.pdf`
+/// (text and images, as rendered), close the browser and return the file path.
+/// On failure the browser stays open so the user can fix things and retry.
+#[tauri::command]
+async fn capture_browser_pdf(app: AppHandle, id: String) -> Result<String, String> {
+    if !db::is_valid_id(&id) {
+        return Err(format!("非法的 ID: {id}"));
+    }
+    let mut session = take_pdf_browser(&app).ok_or("浏览器尚未打开，请先打开网页")?;
+    if !session.is_alive() && session.browser.kind == browser::BrowserKind::Firefox {
+        return Err("浏览器窗口已关闭，请重新打开".into());
+    }
+    let (session, result) = tauri::async_runtime::spawn_blocking(move || {
+        let r = session.capture_pdf();
+        (session, r)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let bytes = match result {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            *app.state::<PdfBrowser>()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(session);
+            return Err(e);
+        }
+    };
+    let path = with_library(app, move |lib| lib.store_pdf(&id, &bytes)).await?;
+    tauri::async_runtime::spawn_blocking(move || session.close());
+    Ok(path)
+}
+
+/// Close the browser opened by [`open_pdf_browser`] (cancel).
+#[tauri::command]
+async fn close_pdf_browser(app: AppHandle) -> Result<(), String> {
+    if let Some(s) = take_pdf_browser(&app) {
+        tauri::async_runtime::spawn_blocking(move || s.close())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Open the saved PDF with the system's default PDF viewer.
+#[tauri::command]
+async fn open_pdf(app: AppHandle, id: String) -> Result<(), String> {
+    let path = with_library(app.clone(), move |lib| lib.pdf_path(&id))
+        .await?
+        .ok_or("PDF 文件不存在")?;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("无法打开 PDF: {e}"))
 }
 
 /// Download the cover image to `数据目录/thumbnails/` and return its absolute path.
@@ -366,6 +514,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(PdfBrowser::default())
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_data_dir,
@@ -375,6 +524,13 @@ pub fn run() {
             cache_thumbnail,
             store_cover,
             fetch_github_repo,
+            fetch_web_page,
+            download_web_pdf,
+            list_browsers,
+            open_pdf_browser,
+            capture_browser_pdf,
+            close_pdf_browser,
+            open_pdf,
             load_gemini_config,
             save_gemini_config,
             fetch_latest_release,

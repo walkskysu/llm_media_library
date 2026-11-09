@@ -15,7 +15,17 @@
   - 通过 GitHub API 读取仓库信息（简介、语言、Star 数等）和 README，交给 Gemini 生成中文摘要与一句话功能标题
   - 自动生成封面图片（仓库名 + 功能标题），保存到数据目录的 `thumbnails/` 中
   - 详情中可查看摘要、重新生成摘要 / 封面、在 GitHub 打开
-- 首页以卡片式网格（Card-based Grid Layout）展示所有收藏，可在「全部 / YouTube / GitHub」之间切换，支持搜索
+- 输入一般网址（如 `https://example.com/article`、`example.com/post`）即可收藏网页（`github.com` 开头的地址仍按上面的 GitHub 规则处理）：
+  - 收藏时会询问是否「同时将网页内容保存为 PDF 文件」。PDF 由**本机浏览器**生成：可选 Google Chrome / Microsoft Edge /
+    Mozilla Firefox（也可用环境变量 `LLM_MEDIA_LIBRARY_BROWSER` 指定浏览器路径）。应用会打开一个浏览器窗口显示该网页，
+    需要登录的文章可直接在窗口中登录；文章完整显示后点击「抓取并保存 PDF」，应用会自动滚动页面加载图片，
+    再把文字和图片按浏览器中显示的样子打印成 PDF，保存到数据目录的 `pdfs/` 中，然后关闭该窗口。
+    这个窗口使用本应用专用的浏览器配置（位于应用本地数据目录的 `browser-profiles/`），登录状态会保留，下次无需重复登录。
+    若网址本身就是 PDF 文件，则直接下载保存
+  - 读取网页标题、简介、网站名称与正文（自动识别 GBK / Big5 等编码），交给 Gemini 生成中文的网页介绍
+  - 自动生成以网页标题为内容的封面图片；详情中可查看网页介绍、内嵌浏览已保存的 PDF，
+    以及「保存为 PDF / 重新生成 PDF」「打开 PDF」（系统默认阅读器）「在浏览器打开」等操作
+- 首页以卡片式网格（Card-based Grid Layout）展示所有收藏，可在「全部 / YouTube / GitHub / 网址 / PDF 文件」之间切换，支持搜索
 - 点击封面打开详情：内嵌播放器播放、查看完整信息与逐字稿；**点击逐字稿中的时间戳可跳转播放**
 - 可以重新生成逐字稿 / 刷新信息 / 复制逐字稿 / 删除
 - 「⚙ 设置 → 版本与更新」显示当前版本，并自动检查 [GitHub Releases](https://github.com/walkskysu/llm_media_library/releases)
@@ -32,8 +42,9 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `library.db` | SQLite 数据库，保存收藏列表（YouTube 视频的元数据与逐字稿、GitHub 仓库的信息与摘要） |
-| `thumbnails/` | 封面图（YouTube 封面下载保存、GitHub 封面本地生成，界面只从本地加载封面） |
+| `library.db` | SQLite 数据库，保存收藏列表（YouTube 视频的元数据与逐字稿、GitHub 仓库的信息与摘要、网页的信息与介绍） |
+| `thumbnails/` | 封面图（YouTube 封面下载保存、GitHub / 网页封面本地生成，界面只从本地加载封面） |
+| `pdfs/` | 保存为 PDF 的网页 |
 | `conf.json` | Gemini 配置（可在设置界面中填写后自动写入） |
 
 > 从旧版本升级：若数据目录中存在旧的 `library.json`，首次打开时会自动导入到 `library.db`，

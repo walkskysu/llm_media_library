@@ -1,5 +1,6 @@
-//! SQLite-backed video library (`library.db` inside the data directory) and
-//! local cover-image cache (`thumbnails/<id>.jpg`).
+//! SQLite-backed video library (`library.db` inside the data directory),
+//! local cover-image cache (`thumbnails/<id>.jpg`) and saved web-page PDFs
+//! (`pdfs/<id>.pdf`).
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 pub const DB_FILE: &str = "library.db";
 pub const LEGACY_JSON_FILE: &str = "library.json";
 pub const THUMB_DIR: &str = "thumbnails";
+pub const PDF_DIR: &str = "pdfs";
 
 /// Max accepted cover image size (protects against bogus responses).
 const MAX_THUMB_BYTES: u64 = 10 * 1024 * 1024;
@@ -35,7 +37,10 @@ pub struct Video {
     /// the backend (see [`Library::cache_thumbnail`]) and ignored on upsert.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_thumbnail: Option<String>,
-    /// `youtube` (default) or `github`.
+    /// Absolute path of the saved PDF (web pages). Output-only like `local_thumbnail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_pdf: Option<String>,
+    /// `youtube` (default), `github` or `web`.
     pub kind: String,
     /// GitHub: Gemini summary of the README.
     pub summary: String,
@@ -76,7 +81,12 @@ ALTER TABLE videos ADD COLUMN stars    INTEGER;
 ALTER TABLE videos ADD COLUMN language TEXT NOT NULL DEFAULT '';
 ";
 
-const SCHEMA_VERSION: i64 = 2;
+/// v3: web pages may have a saved PDF (`pdfs/<id>.pdf`).
+const MIGRATION_V3: &str = "
+ALTER TABLE videos ADD COLUMN pdf_file TEXT;
+";
+
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Library {
     dir: PathBuf,
@@ -105,11 +115,11 @@ impl Library {
             conn.pragma_update(None, "user_version", 1)
                 .map_err(sql_err)?;
         }
-        if version < SCHEMA_VERSION {
-            conn.execute_batch(&format!(
-                "BEGIN;{MIGRATION_V2}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
-            ))
-            .map_err(sql_err)?;
+        for (v, sql) in [(2, MIGRATION_V2), (SCHEMA_VERSION, MIGRATION_V3)] {
+            if version < v {
+                conn.execute_batch(&format!("BEGIN;{sql}PRAGMA user_version = {v};COMMIT;"))
+                    .map_err(sql_err)?;
+            }
         }
         let mut lib = Library {
             dir: dir.to_path_buf(),
@@ -148,7 +158,7 @@ impl Library {
             .prepare(
                 "SELECT id, url, title, author, published_at, duration_seconds, description,
                         thumbnail_url, transcript, status, error, added_at, updated_at, thumbnail_file,
-                        kind, summary, headline, stars, language
+                        kind, summary, headline, stars, language, pdf_file
                  FROM videos ORDER BY added_at DESC",
             )
             .map_err(sql_err)?;
@@ -170,6 +180,7 @@ impl Library {
                         added_at: r.get(11)?,
                         updated_at: r.get(12)?,
                         local_thumbnail: None,
+                        local_pdf: None,
                         kind: r.get(14)?,
                         summary: r.get(15)?,
                         headline: r.get(16)?,
@@ -177,44 +188,91 @@ impl Library {
                         language: r.get(18)?,
                     },
                     r.get::<_, Option<String>>(13)?,
+                    r.get::<_, Option<String>>(19)?,
                 ))
             })
             .map_err(sql_err)?;
         let mut out = Vec::new();
         for row in rows {
-            let (mut v, file) = row.map_err(sql_err)?;
-            v.local_thumbnail = file
-                .map(|f| self.dir.join(f))
-                .filter(|p| p.is_file())
-                .map(|p| p.display().to_string());
+            let (mut v, file, pdf) = row.map_err(sql_err)?;
+            v.local_thumbnail = self.existing_file(file);
+            v.local_pdf = self.existing_file(pdf);
             out.push(v);
         }
         Ok(out)
+    }
+
+    /// Absolute path of a stored relative file, if it still exists on disk.
+    fn existing_file(&self, rel: Option<String>) -> Option<String> {
+        rel.map(|f| self.dir.join(f))
+            .filter(|p| p.is_file())
+            .map(|p| p.display().to_string())
     }
 
     pub fn upsert(&self, v: &Video) -> Result<(), String> {
         upsert(&self.conn, v)
     }
 
-    /// Delete a video and its cached cover image.
+    /// Delete a video and its cached cover image / saved PDF.
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        let file: Option<String> = self
+        let files: Option<(Option<String>, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT thumbnail_file FROM videos WHERE id = ?1",
+                "SELECT thumbnail_file, pdf_file FROM videos WHERE id = ?1",
                 [id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
-            .map_err(sql_err)?
-            .flatten();
+            .map_err(sql_err)?;
         self.conn
             .execute("DELETE FROM videos WHERE id = ?1", [id])
             .map_err(sql_err)?;
-        if let Some(f) = file {
-            let _ = fs::remove_file(self.dir.join(f));
+        if let Some((thumb, pdf)) = files {
+            for f in [thumb, pdf].into_iter().flatten() {
+                let _ = fs::remove_file(self.dir.join(f));
+            }
         }
         Ok(())
+    }
+
+    /// Store PDF bytes as the entry's saved PDF (`pdfs/<id>.pdf`) and record it in the DB.
+    /// Returns the absolute path of the stored file.
+    pub fn store_pdf(&self, id: &str, bytes: &[u8]) -> Result<String, String> {
+        if !is_valid_id(id) {
+            return Err(format!("非法的 ID: {id}"));
+        }
+        if !exists(&self.conn, id)? {
+            return Err(format!("收藏不存在: {id}"));
+        }
+        if !bytes.starts_with(b"%PDF-") {
+            return Err("不是有效的 PDF 文件".into());
+        }
+        let rel = format!("{PDF_DIR}/{id}.pdf");
+        let abs = self.dir.join(&rel);
+        fs::create_dir_all(self.dir.join(PDF_DIR)).map_err(|e| e.to_string())?;
+        let tmp = abs.with_extension("pdf.tmp");
+        fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &abs).map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "UPDATE videos SET pdf_file = ?2 WHERE id = ?1",
+                params![id, rel],
+            )
+            .map_err(sql_err)?;
+        Ok(abs.display().to_string())
+    }
+
+    /// Absolute path of the entry's saved PDF, if any.
+    pub fn pdf_path(&self, id: &str) -> Result<Option<String>, String> {
+        let rel: Option<String> = self
+            .conn
+            .query_row("SELECT pdf_file FROM videos WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(sql_err)?
+            .flatten();
+        Ok(self.existing_file(rel))
     }
 
     /// Store image bytes as the video's local cover and record it in the DB.
@@ -324,7 +382,8 @@ fn upsert(conn: &Connection, v: &Video) -> Result<(), String> {
 }
 
 /// YouTube ids are 11 chars of `[A-Za-z0-9_-]`; GitHub entries use
-/// `github.<owner>.<repo>` (repo names may contain `.`). Ids never contain a
+/// `github.<owner>.<repo>` (repo names may contain `.`), web pages
+/// `web.<url hash>`. Ids never contain a
 /// path separator or start with `.`, so they are always safe as file names.
 pub fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -501,9 +560,40 @@ mod tests {
         let list = lib.list().unwrap();
         assert_eq!(list[0].kind, "youtube");
         assert_eq!(list[0].stars, None);
+        assert_eq!(list[0].local_pdf, None);
+        let version: i64 = lib
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
         // Re-opening must not re-run the migration.
         drop(lib);
         Library::open(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn stores_pdfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path()).unwrap();
+        let mut w = video("web.0123456789abcdef", "2024-04-01");
+        w.kind = "web".into();
+        let pdf = b"%PDF-1.7\n%%EOF";
+        assert!(lib.store_pdf(&w.id, pdf).is_err()); // row does not exist
+        lib.upsert(&w).unwrap();
+        assert!(lib.store_pdf(&w.id, b"<html>").is_err());
+        assert!(lib.store_pdf("../evil", pdf).is_err());
+        assert_eq!(lib.pdf_path(&w.id).unwrap(), None);
+        let path = lib.store_pdf(&w.id, pdf).unwrap();
+        assert!(path.ends_with("web.0123456789abcdef.pdf"));
+        assert_eq!(lib.pdf_path(&w.id).unwrap().as_deref(), Some(path.as_str()));
+        let listed = &lib.list().unwrap()[0];
+        assert_eq!(listed.local_pdf.as_deref(), Some(path.as_str()));
+        assert_eq!(listed.kind, "web");
+        // Upserting from the frontend keeps the PDF.
+        lib.upsert(&w).unwrap();
+        assert!(lib.list().unwrap()[0].local_pdf.is_some());
+        lib.delete(&w.id).unwrap();
+        assert!(!Path::new(&path).exists());
     }
 
     #[test]

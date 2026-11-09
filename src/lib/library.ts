@@ -1,5 +1,6 @@
 import { githubId, repoUrl, type RepoRef } from "./github";
 import type { MediaKind, Video } from "./types";
+import { hostOf, webId } from "./web";
 import { thumbnailUrl, watchUrl } from "./youtube";
 
 export const kindOf = (v: Pick<Video, "kind">): MediaKind => v.kind ?? "youtube";
@@ -46,16 +47,48 @@ export function newGithubRepo(ref: RepoRef, now = new Date()): Video {
   };
 }
 
-/** Home page tab: everything, or one kind. */
-export type KindFilter = "all" | MediaKind;
+/** A generic web page (`url` must already be normalised, see `normalizeWebUrl`). */
+export function newWebPage(url: string, now = new Date()): Video {
+  const ts = now.toISOString();
+  const host = hostOf(url);
+  return {
+    id: webId(url),
+    url,
+    title: host || url,
+    author: host,
+    publishedAt: "",
+    durationSeconds: null,
+    description: "",
+    thumbnailUrl: "",
+    transcript: "",
+    status: "processing",
+    addedAt: ts,
+    updatedAt: ts,
+    kind: "web",
+    summary: "",
+    headline: "",
+    stars: null,
+    language: "",
+  };
+}
+
+/** Home page tab: everything, one kind, or every entry that has a saved PDF. */
+export type KindFilter = "all" | MediaKind | "pdf";
+
+export const hasPdf = (v: Pick<Video, "localPdf">) => !!v.localPdf;
 
 export function filterByKind(videos: Video[], kind: KindFilter): Video[] {
-  return kind === "all" ? videos : videos.filter((v) => kindOf(v) === kind);
+  if (kind === "all") return videos;
+  if (kind === "pdf") return videos.filter(hasPdf);
+  return videos.filter((v) => kindOf(v) === kind);
 }
 
 export function countByKind(videos: Video[]): Record<KindFilter, number> {
-  const counts = { all: videos.length, youtube: 0, github: 0 };
-  for (const v of videos) counts[kindOf(v)]++;
+  const counts = { all: videos.length, youtube: 0, github: 0, web: 0, pdf: 0 };
+  for (const v of videos) {
+    counts[kindOf(v)]++;
+    if (hasPdf(v)) counts.pdf++;
+  }
   return counts;
 }
 

@@ -83,12 +83,15 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-so
 .cover .badge { position: absolute; left: 8px; top: 8px; }
 .badge.processing { background: rgba(22,119,255,0.9); color: #fff; }
 .badge.error { background: rgba(255,77,79,0.9); color: #fff; }
+.chips { position: absolute; right: 8px; top: 8px; display: flex; gap: 4px; }
 .kind-chip {
-  position: absolute; right: 8px; top: 8px; padding: 2px 8px; border-radius: 999px;
+  padding: 2px 8px; border-radius: 999px;
   font-size: 11px; font-weight: 600; color: #fff; background: rgba(0,0,0,0.6);
 }
 .kind-chip.youtube { background: rgba(255,0,0,0.85); }
 .kind-chip.github { background: rgba(36,41,47,0.9); }
+.kind-chip.web { background: rgba(22,119,255,0.9); }
+.kind-chip.pdf { background: rgba(207,19,34,0.9); }
 .meta .headline { color: var(--text); flex-basis: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-body { padding: 12px 14px 14px; }
 .title {
@@ -163,3 +166,20 @@ button.stamp:hover { text-decoration: underline; }
   white-space: pre-wrap; word-break: break-word; font: inherit; color: var(--muted);
   background: var(--panel-2); padding: 12px; border-radius: 8px; max-height: 220px; overflow: auto;
 }
+
+/* ---------- web pages & PDFs ---------- */
+.url-line { color: var(--muted); font-size: 13px; word-break: break-all; }
+.meta .url-line { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal.settings label.check { flex-direction: row; align-items: flex-start; gap: 10px; color: var(--text); cursor: pointer; }
+.modal.settings label.check input { margin-top: 4px; }
+.modal.settings label.check small { display: block; margin-top: 2px; }
+.pdf-section { padding: 0 24px 28px; }
+.pdf-section:empty { display: none; }
+.pdf-section h3 { margin-top: 0; }
+.pdf-frame { width: 100%; height: 75vh; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
+.modal.pdf-capture .row { margin-top: 0; }
+.modal.pdf-capture select {
+  flex: 1; min-width: 0; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text); font: inherit;
+}
+.capture-status { min-height: 1.4em; }

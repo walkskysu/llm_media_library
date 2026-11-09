@@ -32,8 +32,46 @@ function fit(ctx: CanvasRenderingContext2D, text: string, width: number, sizes: 
   return { size, lines: wrapText(text, width, (s) => ctx.measureText(s).width, maxLines) };
 }
 
+/** Generic cover layout: small top label, big title, accent bar, headline, footer line. */
+export interface CoverLayout {
+  label: string;
+  title: string;
+  headline: string;
+  footer: string;
+  /** Seed for the colour scheme. */
+  hueKey: string;
+  /** Font sizes to try for the title, largest first. */
+  titleSizes: number[];
+  titleLines: number;
+}
+
 /** Draw a 1280×720 cover with the repo name and a feature headline; returns PNG bytes. */
-export async function renderGithubCover(input: CoverInput): Promise<Uint8Array> {
+export function renderGithubCover(input: CoverInput): Promise<Uint8Array> {
+  return renderCover({
+    label: `GitHub  ·  ${input.owner}`,
+    title: input.name,
+    headline: input.headline,
+    footer: [input.language, input.stars != null ? `★ ${formatStars(input.stars)}` : ""].filter(Boolean).join("   ·   "),
+    hueKey: `${input.owner}/${input.name}`.toLowerCase(),
+    titleSizes: [104, 92, 80, 68, 56],
+    titleLines: 2,
+  });
+}
+
+/** Cover for a bookmarked web page: the page title is the main content. */
+export function renderWebCover(input: { title: string; site: string; headline: string; host: string; hasPdf?: boolean }) {
+  return renderCover({
+    label: `网页  ·  ${input.site || input.host}`,
+    title: input.title,
+    headline: input.headline,
+    footer: [input.host, input.hasPdf ? "PDF" : ""].filter(Boolean).join("   ·   "),
+    hueKey: input.host.toLowerCase(),
+    titleSizes: [84, 74, 64, 56, 48],
+    titleLines: 3,
+  });
+}
+
+export async function renderCover(input: CoverLayout): Promise<Uint8Array> {
   const canvas = document.createElement("canvas");
   canvas.width = COVER_WIDTH;
   canvas.height = COVER_HEIGHT;
@@ -42,7 +80,7 @@ export async function renderGithubCover(input: CoverInput): Promise<Uint8Array> 
   const W = COVER_WIDTH;
   const H = COVER_HEIGHT;
   const pad = 88;
-  const hue = coverHue(`${input.owner}/${input.name}`.toLowerCase());
+  const hue = coverHue(input.hueKey);
 
   // Background: dark diagonal gradient + soft glow.
   const bg = ctx.createLinearGradient(0, 0, W, H);
@@ -60,12 +98,12 @@ export async function renderGithubCover(input: CoverInput): Promise<Uint8Array> 
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "rgba(255,255,255,0.7)";
   ctx.font = `600 30px ${FONT}`;
-  ctx.fillText(`GitHub  ·  ${input.owner}`, pad, pad + 20);
+  ctx.fillText(input.label, pad, pad + 20);
 
-  // Repo name.
-  const name = fit(ctx, input.name, W - pad * 2, [104, 92, 80, 68, 56], "800", 2);
+  // Title.
+  const name = fit(ctx, input.title, W - pad * 2, input.titleSizes, "800", input.titleLines);
   ctx.fillStyle = "#ffffff";
-  let y = 250;
+  let y = input.titleLines > 2 && name.lines.length > 2 ? 210 : 250;
   for (const line of name.lines) {
     ctx.fillText(line, pad, y);
     y += name.size * 1.12;
@@ -79,7 +117,8 @@ export async function renderGithubCover(input: CoverInput): Promise<Uint8Array> 
 
   // Headline.
   if (input.headline.trim()) {
-    const head = fit(ctx, input.headline, W - pad * 2, [52, 46, 40, 34], "600", 3);
+    const room = Math.max(2, Math.min(3, Math.floor((H - pad - 40 - y) / 50)));
+    const head = fit(ctx, input.headline, W - pad * 2, [52, 46, 40, 34], "600", room);
     ctx.fillStyle = "rgba(255,255,255,0.92)";
     for (const line of head.lines) {
       ctx.fillText(line, pad, y + head.size * 0.4);
@@ -87,8 +126,8 @@ export async function renderGithubCover(input: CoverInput): Promise<Uint8Array> 
     }
   }
 
-  // Footer: language + stars.
-  const footer = [input.language, input.stars != null ? `★ ${formatStars(input.stars)}` : ""].filter(Boolean).join("   ·   ");
+  // Footer.
+  const footer = input.footer;
   if (footer) {
     ctx.fillStyle = "rgba(255,255,255,0.65)";
     ctx.font = `500 30px ${FONT}`;

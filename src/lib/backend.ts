@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { GeminiConfig, Settings, Video } from "./types";
+import type { RawPage } from "./web";
+
+export interface BrowserInfo {
+  id: string;
+  name: string;
+  path: string;
+}
 
 export const backend = {
   getSettings: () => invoke<Settings>("get_settings"),
@@ -14,6 +21,20 @@ export const backend = {
   /** Public GitHub repo API JSON + raw README text (empty if the repo has none). */
   fetchGithubRepo: (owner: string, repo: string) =>
     invoke<{ repo: unknown; readme: string }>("fetch_github_repo", { owner, repo }),
+  /** Raw page bytes (base64) + final URL / content type; decode with `decodePage`. */
+  fetchWebPage: (url: string) => invoke<RawPage>("fetch_web_page", { url }),
+  /** If the URL serves a PDF itself, save it to 数据目录/pdfs/<id>.pdf; null = regular web page. */
+  downloadWebPdf: (id: string, url: string) => invoke<string | null>("download_web_pdf", { id, url }),
+  /** Installed browsers usable for saving pages as PDF (Chrome / Edge / Firefox). */
+  listBrowsers: () => invoke<BrowserInfo[]>("list_browsers"),
+  /** Open the page in a visible local browser window (so the user can log in); resolves to the browser name. */
+  openPdfBrowser: (url: string, browser: string | null) => invoke<string>("open_pdf_browser", { url, browser }),
+  /** Print the page shown in that browser to 数据目录/pdfs/<id>.pdf and close it; resolves to the file path. */
+  captureBrowserPdf: (id: string) => invoke<string>("capture_browser_pdf", { id }),
+  /** Close the browser opened by openPdfBrowser. */
+  closePdfBrowser: () => invoke<void>("close_pdf_browser"),
+  /** Open the saved PDF with the system viewer. */
+  openPdf: (id: string) => invoke<void>("open_pdf", { id }),
   loadGeminiConfig: () => invoke<GeminiConfig>("load_gemini_config"),
   saveGeminiConfig: (apiKey: string, model: string) =>
     invoke<GeminiConfig>("save_gemini_config", { apiKey, model }),
