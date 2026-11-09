@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { GeminiConfig, Settings, Video } from "./types";
+import type { RawPage } from "./web";
 
 export const backend = {
   getSettings: () => invoke<Settings>("get_settings"),
@@ -14,6 +15,12 @@ export const backend = {
   /** Public GitHub repo API JSON + raw README text (empty if the repo has none). */
   fetchGithubRepo: (owner: string, repo: string) =>
     invoke<{ repo: unknown; readme: string }>("fetch_github_repo", { owner, repo }),
+  /** Raw page bytes (base64) + final URL / content type; decode with `decodePage`. */
+  fetchWebPage: (url: string) => invoke<RawPage>("fetch_web_page", { url }),
+  /** Save the page as 数据目录/pdfs/<id>.pdf (headless Edge/Chrome); resolves to the local file path. */
+  saveWebPdf: (id: string, url: string) => invoke<string>("save_web_pdf", { id, url }),
+  /** Open the saved PDF with the system viewer. */
+  openPdf: (id: string) => invoke<void>("open_pdf", { id }),
   loadGeminiConfig: () => invoke<GeminiConfig>("load_gemini_config"),
   saveGeminiConfig: (apiKey: string, model: string) =>
     invoke<GeminiConfig>("save_gemini_config", { apiKey, model }),

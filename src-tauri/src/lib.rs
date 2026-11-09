@@ -6,11 +6,13 @@
 //!   with cover images cached locally under `thumbnails/` (see [`db`])
 //! - load `GEMINI_API_KEY` / `GEMINI_API_MODEL` from a `conf.json` file
 //!   (a legacy `.env` in the data directory is migrated automatically)
+//! - fetch web pages and save them as PDF via a headless browser (see [`web`])
 //! - check GitHub Releases for a newer version and install it (see [`updater`])
 
 pub mod db;
 pub mod github;
 pub mod updater;
+pub mod web;
 
 use db::{Library, Video};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
 
 const SETTINGS_FILE: &str = "settings.json";
 const CONF_FILE: &str = "conf.json";
@@ -230,12 +233,14 @@ fn set_data_dir(app: AppHandle, path: String) -> Result<Settings, String> {
     Ok(settings)
 }
 
-/// Let the webview load cached cover images through the asset protocol.
+/// Let the webview load cached cover images and saved PDFs through the asset protocol.
 fn allow_thumbnail_dir(app: &AppHandle, dir: &Path) {
-    let thumbs = dir.join(db::THUMB_DIR);
-    let _ = fs::create_dir_all(&thumbs);
-    if let Err(e) = app.asset_protocol_scope().allow_directory(&thumbs, true) {
-        eprintln!("failed to allow thumbnail dir in asset scope: {e}");
+    for sub in [db::THUMB_DIR, db::PDF_DIR] {
+        let path = dir.join(sub);
+        let _ = fs::create_dir_all(&path);
+        if let Err(e) = app.asset_protocol_scope().allow_directory(&path, true) {
+            eprintln!("failed to allow {sub} dir in asset scope: {e}");
+        }
     }
 }
 
@@ -279,6 +284,43 @@ async fn fetch_github_repo(owner: String, repo: String) -> Result<Value, String>
     tauri::async_runtime::spawn_blocking(move || github::fetch_repo(&owner, &repo))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Web page HTML (base64, undecoded) + final URL + content type.
+#[tauri::command]
+async fn fetch_web_page(url: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || web::fetch_page(&url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Save the web page as `数据目录/pdfs/<id>.pdf` (downloaded directly if the URL
+/// is a PDF, otherwise printed by a headless Edge/Chrome); returns the file path.
+#[tauri::command]
+async fn save_web_pdf(app: AppHandle, id: String, url: String) -> Result<String, String> {
+    if !db::is_valid_id(&id) {
+        return Err(format!("非法的 ID: {id}"));
+    }
+    let work = std::env::temp_dir().join(format!(
+        "llm-media-library-pdf-{}-{}",
+        std::process::id(),
+        id
+    ));
+    let bytes = tauri::async_runtime::spawn_blocking(move || web::page_pdf(&url, &work))
+        .await
+        .map_err(|e| e.to_string())??;
+    with_library(app, move |lib| lib.store_pdf(&id, &bytes)).await
+}
+
+/// Open the saved PDF with the system's default PDF viewer.
+#[tauri::command]
+async fn open_pdf(app: AppHandle, id: String) -> Result<(), String> {
+    let path = with_library(app.clone(), move |lib| lib.pdf_path(&id))
+        .await?
+        .ok_or("PDF 文件不存在")?;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("无法打开 PDF: {e}"))
 }
 
 /// Download the cover image to `数据目录/thumbnails/` and return its absolute path.
@@ -375,6 +417,9 @@ pub fn run() {
             cache_thumbnail,
             store_cover,
             fetch_github_repo,
+            fetch_web_page,
+            save_web_pdf,
+            open_pdf,
             load_gemini_config,
             save_gemini_config,
             fetch_latest_release,

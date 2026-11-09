@@ -7,6 +7,7 @@ import {
   kindOf,
   newGithubRepo,
   newVideo,
+  newWebPage,
   recoverInterrupted,
   sortVideos,
   thumbnailCandidates,
@@ -57,7 +58,7 @@ describe("kinds", () => {
     expect(filterByKind(all, "all")).toHaveLength(3);
     expect(filterByKind(all, "youtube")).toEqual([yt, legacy]);
     expect(filterByKind(all, "github")).toEqual([gh]);
-    expect(countByKind(all)).toEqual({ all: 3, youtube: 2, github: 1 });
+    expect(countByKind(all)).toEqual({ all: 3, youtube: 2, github: 1, web: 0, pdf: 0 });
   });
   it("searches the repo summary", () => expect(filterVideos([yt, gh], "desktop")).toEqual([gh]));
 });
@@ -86,5 +87,20 @@ describe("createQueue", () => {
     await expect(slow).rejects.toThrow("x");
     await fast;
     expect(log).toEqual(["a", "b"]);
+  });
+});
+
+describe("web pages", () => {
+  const a = newVideo("aaaaaaaaaaa");
+  it("creates web page entries and filters by kind / pdf", () => {
+    const w = newWebPage("https://www.example.com/post", new Date("2024-03-01"));
+    expect(w.kind).toBe("web");
+    expect(w.id).toMatch(/^web\./);
+    expect(w.title).toBe("example.com");
+    const withPdf = { ...newWebPage("https://example.com/b"), localPdf: "/data/pdfs/x.pdf" };
+    const all = [a, w, withPdf];
+    expect(filterByKind(all, "web")).toEqual([w, withPdf]);
+    expect(filterByKind(all, "pdf")).toEqual([withPdf]);
+    expect(countByKind(all)).toEqual({ all: 3, youtube: 1, github: 0, web: 2, pdf: 1 });
   });
 });
