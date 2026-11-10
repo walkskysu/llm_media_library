@@ -9,7 +9,7 @@ import {
   README_PROMPT_LIMIT,
   wrapText,
 } from "../src/lib/github";
-import { coverHue } from "../src/lib/cover";
+import { randomCoverPalette } from "../src/lib/cover";
 import { extractVideoId } from "../src/lib/youtube";
 
 describe("parseGithubUrl", () => {
@@ -139,10 +139,35 @@ describe("wrapText", () => {
   });
 });
 
-describe("coverHue", () => {
-  it("is stable and in range", () => {
-    expect(coverHue("a/b")).toBe(coverHue("a/b"));
-    expect(coverHue("tauri-apps/tauri")).toBeGreaterThanOrEqual(0);
-    expect(coverHue("tauri-apps/tauri")).toBeLessThan(360);
+describe("randomCoverPalette", () => {
+  const hueOf = (c: string) => Number(/hsla?\((\d+)/.exec(c)![1]);
+
+  it("produces valid hsl colours", () => {
+    for (let i = 0; i < 50; i++) {
+      const p = randomCoverPalette();
+      for (const c of [p.bgFrom, p.bgTo, p.accent]) expect(c).toMatch(/^hsl\(\d+ \d+% \d+%\)$/);
+      expect(p.glow).toMatch(/^hsla\(\d+ 80% 60% \/ 0\.35\)$/);
+      for (const c of [p.bgFrom, p.bgTo, p.glow, p.accent]) {
+        expect(hueOf(c)).toBeGreaterThanOrEqual(0);
+        expect(hueOf(c)).toBeLessThan(360);
+      }
+    }
+  });
+
+  it("spreads background hues across the colour wheel", () => {
+    const sectors = new Set<number>();
+    for (let i = 0; i < 300; i++) sectors.add(Math.floor(hueOf(randomCoverPalette().bgFrom) / 60));
+    expect(sectors.size).toBe(6);
+  });
+
+  it("is driven by the supplied random source", () => {
+    const seq = (vals: number[]) => {
+      let i = 0;
+      return () => vals[i++ % vals.length];
+    };
+    const a = randomCoverPalette(seq([0, 0.5, 0.5, 0.5, 0.5, 0.5]));
+    const b = randomCoverPalette(seq([0.99, 0.5, 0.5, 0.5, 0.5, 0.5]));
+    expect(a).toEqual(randomCoverPalette(seq([0, 0.5, 0.5, 0.5, 0.5, 0.5])));
+    expect(hueOf(a.bgFrom)).not.toBe(hueOf(b.bgFrom));
   });
 });
