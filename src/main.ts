@@ -370,22 +370,28 @@ function renderMain() {
     h(
       "header",
       { class: "topbar" },
-      h("div", { class: "brand" }, "🎬 LLM Media Library"),
+      h("button", { class: "brand", onclick: goHome, title: "返回首页" }, "🎬 LLM Media Library"),
       h("form", { class: "add-form", onsubmit: submit }, urlInput, h("button", { class: "primary", type: "submit" }, "收藏")),
       h("button", { class: "ghost", id: "settings-btn", onclick: openSettings, title: "设置" }, "⚙ 设置"),
     ),
-    !state.gemini.apiKey
-      ? h(
-          "div",
-          { class: "warning" },
-          "未找到 GEMINI_API_KEY。请在 数据目录/conf.json 中配置，或点击右上角 设置 填写。",
-        )
-      : "",
-    h("div", { class: "toolbar" }, h("div", { id: "tabs", class: "tabs", role: "tablist" }), search),
-    h("main", { id: "grid", class: "grid" }),
+    h(
+      "div",
+      { id: "home" },
+      !state.gemini.apiKey
+        ? h(
+            "div",
+            { class: "warning" },
+            "未找到 GEMINI_API_KEY。请在 数据目录/conf.json 中配置，或点击右上角 设置 填写。",
+          )
+        : "",
+      h("div", { class: "toolbar" }, h("div", { id: "tabs", class: "tabs", role: "tablist" }), search),
+      h("main", { id: "grid", class: "grid" }),
+    ),
+    h("section", { id: "detail-page", hidden: true }),
   );
   renderGrid();
   renderUpdateDot();
+  if (state.openId) openDetail(state.openId);
 }
 
 /** Mark the settings button when a newer release is available. */
@@ -618,7 +624,7 @@ function capturePdfInBrowser(id: string): Promise<string | null> {
       document.removeEventListener("keydown", onKey, true);
       if (!path) void backend.closePdfBrowser().catch(() => undefined);
       closeModal();
-      if (reopen && state.videos.some((x) => x.id === id)) openDetail(id);
+      if (reopen && state.openId === id && state.videos.some((x) => x.id === id)) renderDetail();
       resolve(path);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -812,15 +818,50 @@ function refresh(id: string) {
   if (state.openId === id) renderDetail();
 }
 
-// ---------- detail modal ----------
+// ---------- detail page ----------
 
+/** Show the full-page detail view for one item (replaces the home grid). */
 function openDetail(id: string) {
+  const home = document.querySelector<HTMLElement>("#home");
+  const page = document.querySelector<HTMLElement>("#detail-page");
+  if (!home || !page) return;
   state.openId = id;
+  home.hidden = true;
+  page.hidden = false;
+  page.replaceChildren();
+  window.scrollTo({ top: 0 });
   renderDetail(true);
 }
 
-function closeModal() {
+/** Leave the detail page and return to the library grid. */
+function goHome() {
+  closeModal();
+  const home = document.querySelector<HTMLElement>("#home");
+  const page = document.querySelector<HTMLElement>("#detail-page");
+  const wasOpen = state.openId !== null;
   state.openId = null;
+  if (!home || !page) return;
+  page.replaceChildren();
+  page.hidden = true;
+  home.hidden = false;
+  if (wasOpen) window.scrollTo({ top: 0 });
+}
+
+/** Mount `el` as the content of the detail page. */
+function mountPage(el: HTMLElement) {
+  document.querySelector("#detail-page")?.replaceChildren(el);
+}
+
+/** The detail page element currently mounted for `kind`, if any. */
+function currentPage(kind: string) {
+  return document.querySelector<HTMLDivElement>(`#detail-page > .page.${kind}`);
+}
+
+function backButton() {
+  return h("button", { class: "ghost back", onclick: goHome, title: "返回首页" }, "← 返回");
+}
+
+function closeModal() {
   document.querySelector(".modal-backdrop")?.remove();
 }
 
@@ -857,15 +898,15 @@ function renderTranscript(text: string, onSeek: (s: number) => void) {
   return box;
 }
 
-/** Re-render the detail modal. `fresh` = (re)create the player; otherwise keep the playing iframe. */
+/** Re-render the detail page. `fresh` = (re)create the player; otherwise keep the playing iframe. */
 function renderDetail(fresh = false) {
   const v = state.videos.find((x) => x.id === state.openId);
-  if (!v) return closeModal();
+  if (!v) return goHome();
   if (kindOf(v) === "github") return renderGithubDetail(v);
   if (kindOf(v) === "web") return renderWebDetail(v);
 
-  let modalEl = document.querySelector<HTMLDivElement>(".modal.video-detail");
-  if (fresh || !modalEl || modalEl.dataset.id !== v.id) {
+  let pageEl = currentPage("video-detail");
+  if (fresh || !pageEl || pageEl.dataset.id !== v.id) {
     const iframe = h("iframe", {
       src: embedUrl(v.id),
       title: v.title,
@@ -873,24 +914,26 @@ function renderDetail(fresh = false) {
       referrerpolicy: "strict-origin-when-cross-origin",
       allowfullscreen: true,
     });
-    modalEl = h(
+    pageEl = h(
       "div",
-      { class: "modal video-detail", "data-id": v.id },
-      h("button", { class: "close", onclick: closeModal, title: "关闭" }, "✕"),
+      { class: "page video-detail", "data-id": v.id },
+      h("div", { class: "page-nav" }, backButton()),
       h("div", { class: "player" }, iframe),
       h("div", { class: "detail" }),
     );
-    modal(modalEl);
+    mountPage(pageEl);
   }
-  const player = modalEl.querySelector("iframe")!;
-  const detail = modalEl.querySelector<HTMLDivElement>(".detail")!;
+  const player = pageEl.querySelector("iframe")!;
+  const detail = pageEl.querySelector<HTMLDivElement>(".detail")!;
+  // Clicking a transcript timestamp scrolls back up to the player and plays from that moment.
   const seek = (s: number) => {
     player.src = embedUrl(v.id, s, true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const remove = async () => {
     if (!window.confirm(`确定删除「${v.title || v.id}」吗？`)) return;
-    closeModal();
+    goHome();
     await removeVideo(v.id);
     renderGrid();
   };
@@ -932,19 +975,19 @@ function renderDetail(fresh = false) {
 }
 
 function renderGithubDetail(v: Video) {
-  let modalEl = document.querySelector<HTMLDivElement>(".modal.github-detail");
-  if (!modalEl || modalEl.dataset.id !== v.id) {
-    modalEl = h(
+  let pageEl = currentPage("github-detail");
+  if (!pageEl || pageEl.dataset.id !== v.id) {
+    pageEl = h(
       "div",
-      { class: "modal github-detail", "data-id": v.id },
-      h("button", { class: "close", onclick: closeModal, title: "关闭" }, "✕"),
+      { class: "page github-detail", "data-id": v.id },
+      h("div", { class: "page-nav" }, backButton()),
       h("div", { class: "repo-cover" }),
       h("div", { class: "detail" }),
     );
-    modal(modalEl);
+    mountPage(pageEl);
   }
   const src = coverSrc(v);
-  modalEl
+  pageEl
     .querySelector(".repo-cover")!
     .replaceChildren(
       src ? h("img", { src, alt: v.title }) : h("div", { class: "cover-placeholder" }, "封面生成中…"),
@@ -952,7 +995,7 @@ function renderGithubDetail(v: Video) {
   const busy = v.status === "processing";
   const remove = async () => {
     if (!window.confirm(`确定删除「${v.title || v.id}」吗？`)) return;
-    closeModal();
+    goHome();
     await removeVideo(v.id);
     renderGrid();
   };
@@ -960,7 +1003,7 @@ function renderGithubDetail(v: Video) {
     await navigator.clipboard.writeText(v.summary ?? "");
     toast("已复制摘要");
   };
-  modalEl.querySelector(".detail")!.replaceChildren(
+  pageEl.querySelector(".detail")!.replaceChildren(
     h("h2", {}, v.title || v.url),
     v.headline ? h("p", { class: "repo-headline" }, v.headline) : "",
     h(
@@ -991,27 +1034,27 @@ function renderGithubDetail(v: Video) {
 }
 
 function renderWebDetail(v: Video) {
-  let modalEl = document.querySelector<HTMLDivElement>(".modal.web-detail");
-  if (!modalEl || modalEl.dataset.id !== v.id) {
-    modalEl = h(
+  let pageEl = currentPage("web-detail");
+  if (!pageEl || pageEl.dataset.id !== v.id) {
+    pageEl = h(
       "div",
-      { class: "modal web-detail", "data-id": v.id },
-      h("button", { class: "close", onclick: closeModal, title: "关闭" }, "✕"),
+      { class: "page web-detail", "data-id": v.id },
+      h("div", { class: "page-nav" }, backButton()),
       h("div", { class: "repo-cover" }),
       h("div", { class: "detail" }),
       h("div", { class: "pdf-section" }),
     );
-    modal(modalEl);
+    mountPage(pageEl);
   }
   const src = coverSrc(v);
-  modalEl
+  pageEl
     .querySelector(".repo-cover")!
     .replaceChildren(src ? h("img", { src, alt: v.title }) : h("div", { class: "cover-placeholder" }, "封面生成中…"));
   const busy = v.status === "processing";
   const pdfWorking = pdfBusy.has(v.id);
   const remove = async () => {
     if (!window.confirm(`确定删除「${v.title || v.id}」吗？${v.localPdf ? "\n已保存的 PDF 文件也会一并删除。" : ""}`)) return;
-    closeModal();
+    goHome();
     await removeVideo(v.id);
     renderGrid();
   };
@@ -1020,7 +1063,7 @@ function renderWebDetail(v: Video) {
     toast("已复制摘要");
   };
   const openPdf = () => backend.openPdf(v.id).catch((e) => toast(errMsg(e), "error"));
-  modalEl.querySelector(".detail")!.replaceChildren(
+  pageEl.querySelector(".detail")!.replaceChildren(
     h("h2", {}, v.title || v.url),
     v.headline ? h("p", { class: "repo-headline" }, v.headline) : "",
     h(
@@ -1054,7 +1097,7 @@ function renderWebDetail(v: Video) {
       : h("p", { class: "muted" }, busy ? "正在读取网页并使用 Gemini 生成介绍…" : "暂无介绍"),
   );
   // Keep the embedded PDF viewer alive across re-renders unless the file changed.
-  const section = modalEl.querySelector<HTMLDivElement>(".pdf-section")!;
+  const section = pageEl.querySelector<HTMLDivElement>(".pdf-section")!;
   const pdf = pdfSrc(v);
   if (section.dataset.src === (pdf ?? "") && section.dataset.busy === String(pdfWorking)) return;
   section.dataset.src = pdf ?? "";
@@ -1164,7 +1207,6 @@ function renderUpdateSection() {
 // ---------- settings ----------
 
 function openSettings() {
-  state.openId = null;
   const key = h("input", { type: "password", value: state.gemini.apiKey ?? "", placeholder: "GEMINI_API_KEY" });
   const model = h("input", { type: "text", value: state.gemini.model ?? "", placeholder: DEFAULT_MODEL });
   const save = async () => {
@@ -1225,7 +1267,9 @@ async function boot() {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeModal();
+  if (e.key !== "Escape") return;
+  if (document.querySelector(".modal-backdrop")) closeModal();
+  else if (state.openId) goHome();
 });
 
 void boot();

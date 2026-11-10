@@ -44,7 +44,11 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-so
   padding: 12px 24px; background: rgba(255,255,255,0.92); backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
 }
-.brand { font-weight: 700; font-size: 18px; color: var(--accent); white-space: nowrap; }
+.brand {
+  font-weight: 700; font-size: 18px; color: var(--accent); white-space: nowrap;
+  background: none; border: none; padding: 0;
+}
+.brand:hover:not(:disabled) { color: var(--accent-2); }
 .add-form { flex: 1; display: flex; gap: 8px; }
 .add-form input { flex: 1; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; padding: 16px 24px 0; color: var(--muted); }
@@ -111,6 +115,13 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-so
 .modal.settings { width: min(640px, 100%); padding: 20px 24px 24px; }
 .modal.settings label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; color: var(--muted); }
 .modal.settings code { flex: 1; background: var(--panel-2); padding: 8px 12px; border-radius: 8px; word-break: break-all; }
+/* ---------- detail page ---------- */
+.page {
+  width: min(1100px, 100%); margin: 16px auto 40px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
+}
+.page-nav { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.back { padding: 6px 12px; }
 .close { position: absolute; right: 10px; top: 10px; z-index: 2; background: rgba(0,0,0,0.6); border: none; color: #fff; }
 .close:hover:not(:disabled) { color: #fff; background: rgba(0,0,0,0.8); }
 .player { aspect-ratio: 16 / 9; background: #000; }
