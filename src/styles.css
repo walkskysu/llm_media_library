@@ -57,6 +57,11 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-so
 .tab { border: none; background: transparent; padding: 6px 14px; border-radius: 8px; color: var(--muted); }
 .tab:hover:not(:disabled) { color: var(--accent); }
 .tab.active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,0.08); font-weight: 600; }
+.tab.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.tab.check:hover, .tab.check.checked { color: var(--accent); }
+.tab.check.checked { font-weight: 600; }
+.tab.check input { margin: 0; width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.tab.check .tab-count { margin-left: 0; }
 .tab-count { margin-left: 6px; font-size: 12px; opacity: 0.75; }
 .warning {
   margin: 12px 24px 0; padding: 10px 14px; border-radius: 8px;

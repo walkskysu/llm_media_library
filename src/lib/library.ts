@@ -83,6 +83,15 @@ export function filterByKind(videos: Video[], kind: KindFilter): Video[] {
   return videos.filter((v) => kindOf(v) === kind);
 }
 
+/** A checkbox on the home page: one media kind, or "has a saved PDF". */
+export type KindOption = Exclude<KindFilter, "all">;
+
+/** Entries matching any of the checked options; nothing checked means everything. */
+export function filterByKinds(videos: Video[], kinds: ReadonlySet<KindOption>): Video[] {
+  if (kinds.size === 0) return videos;
+  return videos.filter((v) => kinds.has(kindOf(v)) || (kinds.has("pdf") && hasPdf(v)));
+}
+
 export function countByKind(videos: Video[]): Record<KindFilter, number> {
   const counts = { all: videos.length, youtube: 0, github: 0, web: 0, pdf: 0 };
   for (const v of videos) {
