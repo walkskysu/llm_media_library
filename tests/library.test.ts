@@ -3,6 +3,7 @@ import {
   countByKind,
   createQueue,
   filterByKind,
+  filterByKinds,
   filterVideos,
   kindOf,
   newGithubRepo,
@@ -102,5 +103,17 @@ describe("web pages", () => {
     expect(filterByKind(all, "web")).toEqual([w, withPdf]);
     expect(filterByKind(all, "pdf")).toEqual([withPdf]);
     expect(countByKind(all)).toEqual({ all: 3, youtube: 1, github: 0, web: 2, pdf: 1 });
+  });
+  it("filters by any combination of checked kinds", () => {
+    const a = newVideo("aaaaaaaaaaa");
+    const g = newGithubRepo({ owner: "tauri-apps", repo: "tauri" });
+    const w = newWebPage("https://example.com/a");
+    const withPdf = { ...newWebPage("https://example.com/b"), localPdf: "/data/pdfs/x.pdf" };
+    const all = [a, g, w, withPdf];
+    expect(filterByKinds(all, new Set())).toEqual(all);
+    expect(filterByKinds(all, new Set(["youtube"]))).toEqual([a]);
+    expect(filterByKinds(all, new Set(["youtube", "github"]))).toEqual([a, g]);
+    expect(filterByKinds(all, new Set(["github", "pdf"]))).toEqual([g, withPdf]);
+    expect(filterByKinds(all, new Set(["youtube", "github", "web", "pdf"]))).toEqual(all);
   });
 });

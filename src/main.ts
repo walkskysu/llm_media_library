@@ -8,10 +8,10 @@ import { DEFAULT_MODEL, fetchOEmbed, GeminiClient } from "./lib/gemini";
 import {
   countByKind,
   createQueue,
-  filterByKind,
+  filterByKinds,
   filterVideos,
   kindOf,
-  type KindFilter,
+  type KindOption,
   newGithubRepo,
   newVideo,
   newWebPage,
@@ -50,7 +50,8 @@ const state = {
   gemini: { apiKey: null, model: null, source: null } as GeminiConfig,
   videos: [] as Video[],
   query: "",
-  kind: "all" as KindFilter,
+  /** Checked type filters; empty = 全部. */
+  kinds: new Set<KindOption>(),
   openId: null as string | null,
   appVersion: "",
   update: {
@@ -293,16 +294,17 @@ function card(v: Video) {
 function renderGrid() {
   const grid = document.querySelector<HTMLDivElement>("#grid");
   if (!grid) return;
-  const inTab = filterByKind(state.videos, state.kind);
+  const inTab = filterByKinds(state.videos, state.kinds);
   const list = filterVideos(sortVideos(inTab), state.query);
   if (inTab.length === 0) {
-    const hint = {
+    const hints = {
       all: "还没有收藏任何内容。在上方粘贴 YouTube 视频链接、GitHub 仓库地址或任意网址开始收藏吧！",
       youtube: "还没有收藏的视频。在上方输入 YouTube 链接开始收藏吧！",
       github: "还没有收藏的 GitHub 仓库。在上方粘贴 GitHub 仓库地址开始收藏吧！",
       web: "还没有收藏的网页。在上方粘贴网址开始收藏吧！",
       pdf: "还没有保存为 PDF 的网页。收藏网页时勾选「保存为 PDF」，或在网页详情中点击「保存为 PDF」。",
-    }[state.kind];
+    };
+    const hint = state.kinds.size === 1 ? hints[[...state.kinds][0]] : state.kinds.size ? "所选类型下还没有收藏内容。" : hints.all;
     grid.replaceChildren(h("div", { class: "empty" }, hint));
   } else if (list.length === 0) {
     grid.replaceChildren(h("div", { class: "empty" }, "没有匹配的内容"));
@@ -312,37 +314,58 @@ function renderGrid() {
   renderTabs();
 }
 
-const TABS: { kind: KindFilter; label: string }[] = [
-  { kind: "all", label: "全部" },
+const KIND_OPTIONS: { kind: KindOption; label: string }[] = [
   { kind: "youtube", label: "YouTube" },
   { kind: "github", label: "GitHub" },
   { kind: "web", label: "网址" },
   { kind: "pdf", label: "PDF 文件" },
 ];
 
-/** 全部 / YouTube / GitHub / 网址 / PDF switcher with per-kind counts. */
+/** 「全部」 button plus YouTube / GitHub / 网址 / PDF checkboxes (multi-select), with per-kind counts. */
 function renderTabs() {
   const box = document.querySelector<HTMLDivElement>("#tabs");
   if (!box) return;
   const counts = countByKind(state.videos);
+  // Re-rendering replaces the checkboxes; keep keyboard focus on the one being toggled.
+  const focused = (document.activeElement as HTMLElement | null)?.dataset?.kind;
+  const all = state.kinds.size === 0;
   box.replaceChildren(
-    ...TABS.map((t) =>
-      h(
-        "button",
-        {
-          class: `tab${state.kind === t.kind ? " active" : ""}`,
-          role: "tab",
-          "aria-selected": String(state.kind === t.kind),
-          onclick: () => {
-            state.kind = t.kind;
-            renderGrid();
-          },
+    h(
+      "button",
+      {
+        class: `tab${all ? " active" : ""}`,
+        "aria-pressed": String(all),
+        "data-kind": "all",
+        onclick: () => {
+          state.kinds.clear();
+          renderGrid();
         },
+      },
+      "全部",
+      h("span", { class: "tab-count" }, String(counts.all)),
+    ),
+    ...KIND_OPTIONS.map((t) => {
+      const checked = state.kinds.has(t.kind);
+      const input = h("input", {
+        type: "checkbox",
+        checked,
+        "data-kind": t.kind,
+        onchange: () => {
+          if (input.checked) state.kinds.add(t.kind);
+          else state.kinds.delete(t.kind);
+          renderGrid();
+        },
+      });
+      return h(
+        "label",
+        { class: `tab check${checked ? " checked" : ""}` },
+        input,
         t.label,
         h("span", { class: "tab-count" }, String(counts[t.kind])),
-      ),
-    ),
+      );
+    }),
   );
+  if (focused) box.querySelector<HTMLElement>(`[data-kind="${focused}"]`)?.focus();
 }
 
 function renderMain() {
@@ -384,7 +407,7 @@ function renderMain() {
             "未找到 GEMINI_API_KEY。请在 数据目录/conf.json 中配置，或点击右上角 设置 填写。",
           )
         : "",
-      h("div", { class: "toolbar" }, h("div", { id: "tabs", class: "tabs", role: "tablist" }), search),
+      h("div", { class: "toolbar" }, h("div", { id: "tabs", class: "tabs", role: "group", "aria-label": "按类型筛选" }), search),
       h("main", { id: "grid", class: "grid" }),
     ),
     h("section", { id: "detail-page", hidden: true }),
